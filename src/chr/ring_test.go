@@ -1,5 +1,7 @@
 package chr
 
+// go test ./chr -v -race
+
 import (
 	"testing"
 )
