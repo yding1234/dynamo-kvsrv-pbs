@@ -18,7 +18,7 @@ type end struct {
 type Clnt struct {
 	mu   sync.Mutex
 	net  *labrpc.Network
-	ends map[string]end
+	ends map[string]end // map of server name to ClientEnd, avoid repeated connections to the same server
 
 	// if nil client can connect to all servers
 	// if len(srvs) = 0, client cannot connect to any servers
@@ -30,6 +30,7 @@ func makeClntTo(net *labrpc.Network, srvs []string) *Clnt {
 }
 
 // caller must acquire lock
+// check if server is in srvs, if srvs is nil, return true
 func (clnt *Clnt) allowedL(server string) bool {
 	if clnt.srvs == nil {
 		return true
@@ -42,6 +43,9 @@ func (clnt *Clnt) allowedL(server string) bool {
 	return false
 }
 
+// make a new ClientEnd for a server, 
+// if the server is already in the map, return the existing ClientEnd
+// otherwise, create a new ClientEnd and add it to the map
 func (clnt *Clnt) makeEnd(server string) end {
 	clnt.mu.Lock()
 	defer clnt.mu.Unlock()
@@ -53,7 +57,7 @@ func (clnt *Clnt) makeEnd(server string) end {
 	name := Randstring(20)
 	//log.Printf("%p: makEnd %v %v allowed %t", clnt, name, server, clnt.allowedL(server))
 	end := end{name: name, end: clnt.net.MakeEnd(name)}
-	clnt.net.Connect(name, server)
+	clnt.net.Connect(name, server) // connect to the server
 	if clnt.allowedL(server) {
 		clnt.net.Enable(name, true)
 	} else {
@@ -65,7 +69,7 @@ func (clnt *Clnt) makeEnd(server string) end {
 
 func (clnt *Clnt) Call(server, method string, args interface{}, reply interface{}) bool {
 	end := clnt.makeEnd(server)
-	ok := end.end.Call(method, args, reply)
+	ok := end.end.Call(method, args, reply) // call the method on the server, return true if the server executed the request and the reply is valid
 	//log.Printf("%p: Call done e %v m %v %v %v ok %v", clnt, end.name, method, args, reply, ok)
 	return ok
 }

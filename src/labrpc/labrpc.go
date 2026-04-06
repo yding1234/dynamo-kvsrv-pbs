@@ -77,6 +77,7 @@ type replyMsg struct {
 	reply []byte
 }
 
+// encode the arguments into a byte slice
 func Marshall(args interface{}) []byte {
 	qb := new(bytes.Buffer)
 	qe := labgob.NewEncoder(qb)
@@ -86,6 +87,7 @@ func Marshall(args interface{}) []byte {
 	return qb.Bytes()
 }
 
+// decode the byte slice into the reply interface
 func Unmarshall(b []byte, repl interface{}) {
 	rb := bytes.NewBuffer(b)
 	rd := labgob.NewDecoder(rb)

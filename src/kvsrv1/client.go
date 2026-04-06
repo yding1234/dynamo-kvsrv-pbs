@@ -9,7 +9,7 @@ import (
 
 type Clerk struct {
 	clnt   *tester.Clnt
-	server string
+	server string // server name for current operation
 }
 
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
@@ -21,16 +21,21 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // Get fetches the current value and version for a key.  It returns
 // ErrNoKey if the key does not exist. It keeps trying forever in the
 // face of all other errors.
-//
-// You can send an RPC with code like this:
-// ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
-//
-// The types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := rpc.GetArgs{Key: key}
+	reply := rpc.GetReply{}
+
+	ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply) // first try
+
+	for !ok || (ok && reply.Err != rpc.OK) {
+		if reply.Err == rpc.ErrNoKey {
+			return "", 0, reply.Err
+		}
+		ok = ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply) // retry
+	}
+
+	return reply.Value, reply.Version, reply.Err // success, return OK
 }
 
 // Put updates key with value only if the version in the
@@ -43,14 +48,18 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // its earlier RPC might have been processed by the server successfully
 // but the response was lost, and the Clerk doesn't know if
 // the Put was performed or not.
-//
-// You can send an RPC with code like this:
-// ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
-//
-// The types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return rpc.ErrNoKey
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	reply := rpc.PutReply{}
+
+	resent := false
+	ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply) // first try
+
+	for !ok || (ok && reply.Err == rpc.ErrVersion){
+		if ok && !resent {return reply.Err}
+		if ok && resent {return rpc.ErrMaybe}
+		resent = true
+		ok = ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply) // retry
+	}
+	return reply.Err
 }
