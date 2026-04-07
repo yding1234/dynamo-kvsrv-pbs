@@ -1,6 +1,6 @@
 package kvsrv
 
-// go test ./kvsrv1
+// go test ./kvsrv1 -v
 
 import (
 	// "log"

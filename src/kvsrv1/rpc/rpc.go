@@ -11,9 +11,10 @@ const (
 	// Err returned by Clerk only
 	ErrMaybe = "ErrMaybe"
 
-	// For future kvraft lab
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrWrongGroup  = "ErrWrongGroup"
+	// For consistent hashing
+	ErrNotCoordinator = "ErrNotCoordinator"
+	ErrReadQuorumNotMet  = "ErrReadQuorumNotMet"
+    ErrWriteQuorumNotMet = "ErrWriteQuorumNotMet"
 )
 
 type Tversion uint64

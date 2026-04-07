@@ -14,12 +14,13 @@ type ConsistentHashRing struct {
 	rwMutex     sync.RWMutex
 
 	numReplicas int                     // N in the paper
+	numBackups int                     	// the number of backups excepted the top N replicas in the preference list
 	numSectors  int                     // Q in the paper
 	numServers  int                     // S in the paper
 
 	hashFunc    func(string) uint32
 	nodeIDs     []string
-	nodes       map[string][]int         // keep track of current nodes and their sectors
+	nodes       map[string][]int        // keep track of current nodes and their sectors
 	sectorMap   map[int]string  // sector to servers	
 }
 
@@ -32,6 +33,7 @@ func Hash(key string) uint32 {
 
 func MakeConsistentHashRing(numReplicas int, numSectors int, numServers int, nodeIDs []string) *ConsistentHashRing {
 	chr := &ConsistentHashRing{numReplicas: numReplicas, 
+		numBackups: numReplicas / 2, // TODO: figure out the best value later
 		numSectors: numSectors, 
 		numServers: numServers, 
 		hashFunc: Hash,
@@ -55,7 +57,7 @@ func MakeConsistentHashRing(numReplicas int, numSectors int, numServers int, nod
 
 
 // return the preference list for the key
-func (chr *ConsistentHashRing) GeneratePreferenceList(key string) []string {
+func (chr *ConsistentHashRing) GetPreferenceList(key string) []string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 
@@ -66,7 +68,7 @@ func (chr *ConsistentHashRing) GeneratePreferenceList(key string) []string {
 	prefList := make([]string, 0)
 	curNodeID := chr.sectorMap[position]
 
-	for len(prefList) <= chr.numReplicas { // length of prefList should be greater than N
+	for len(prefList) < chr.numReplicas + chr.numBackups { // length of prefList should be greater than N
 		repeatedNode := false
 		for i := 0; i < len(prefList); i++ {
 			if prefList[i] == curNodeID {
@@ -83,7 +85,7 @@ func (chr *ConsistentHashRing) GeneratePreferenceList(key string) []string {
 	return prefList
 }
 
-func (chr *ConsistentHashRing) FindCoordinator(key string) string {
+func (chr *ConsistentHashRing) GetCoordinator(key string) string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 
@@ -165,4 +167,8 @@ func deleteFromSlice(slice []string, id string) []string {
 		}
 	}
 	return slice
+}
+
+func (chr *ConsistentHashRing) GetNumReplicas() int {
+	return chr.numReplicas
 }
