@@ -66,7 +66,7 @@ func (chr *ConsistentHashRing) GeneratePreferenceList(key string) []string {
 	prefList := make([]string, 0)
 	curNodeID := chr.sectorMap[position]
 
-	for len(prefList) < chr.numReplicas {
+	for len(prefList) <= chr.numReplicas { // length of prefList should be greater than N
 		repeatedNode := false
 		for i := 0; i < len(prefList); i++ {
 			if prefList[i] == curNodeID {
