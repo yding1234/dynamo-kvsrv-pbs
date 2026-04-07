@@ -4,8 +4,6 @@ import (
 	"hash/crc32"
 	"sync"
 	"fmt"
-
-	"6.5840/tester1"
 )
 
 
@@ -32,17 +30,16 @@ func Hash(key string) uint32 {
 }
 
 
-func MakeConsistentHashRing(numReplicas int, numSectors int, numServers int) *ConsistentHashRing {
+func MakeConsistentHashRing(numReplicas int, numSectors int, numServers int, nodeIDs []string) *ConsistentHashRing {
 	chr := &ConsistentHashRing{numReplicas: numReplicas, 
 		numSectors: numSectors, 
 		numServers: numServers, 
 		hashFunc: Hash,
+		nodeIDs: nodeIDs,
 		nodes: make(map[string][]int, 0),
 		sectorMap: make(map[int]string)}
 
-	for i := 0; i < numServers; i++ {
-		nodeID := tester.Randstring(20)
-		chr.nodeIDs = append(chr.nodeIDs, nodeID)
+	for _, nodeID := range nodeIDs {
 		chr.nodes[nodeID] = make([]int, 0)
 	}
 

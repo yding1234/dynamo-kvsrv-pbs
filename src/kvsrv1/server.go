@@ -3,7 +3,6 @@ package kvsrv
 import (
 	"log"
 	"sync"
-	"math/rand"
 
 	"6.5840/tester1"
 	"6.5840/kvsrv1/rpc"
@@ -27,14 +26,13 @@ type KVServer struct {
 	id string
 	kv map[string]string
 	versions map[string]rpc.Tversion // version of the key
-	sectors []int // sectors this server is responsible for
 }
 
 func MakeKVServer() *KVServer {
 	kv := &KVServer{id: tester.Randstring(20), 
 		kv: make(map[string]string), 
 		versions: make(map[string]rpc.Tversion),
-		sectors: make([]int, 0)}
+	}
 	// Your code here.
 	return kv
 }
