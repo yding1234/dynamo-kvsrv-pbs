@@ -47,7 +47,7 @@ func (log *OpLog) Read() []porcupine.Operation {
 // the monotonic clock
 var t0 = time.Unix(0, 0)
 
-func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (string, rpc.Tversion, rpc.Err) {
+func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (string, rpc.Context, rpc.Err) {
 	start := int64(time.Since(t0))
 	val, ver, err := ck.Get(key)
 	end := int64(time.Since(t0))
@@ -55,7 +55,7 @@ func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (stri
 	if log != nil {
 		log.Append(porcupine.Operation{
 			Input:    models.KvInput{Op: 0, Key: key},
-			Output:   models.KvOutput{Value: val, Version: uint64(ver), Err: string(err)},
+			Output:   models.KvOutput{Value: val, Version: ver.Counter(), Err: string(err)},
 			Call:     start,
 			Return:   end,
 			ClientId: cli,
@@ -64,14 +64,14 @@ func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (stri
 	return val, ver, err
 }
 
-func Put(cfg *tester.Config, ck IKVClerk, key string, value string, version rpc.Tversion, log *OpLog, cli int) rpc.Err {
+func Put(cfg *tester.Config, ck IKVClerk, key string, value string, context rpc.Context, log *OpLog, cli int) rpc.Err {
 	start := int64(time.Since(t0))
-	err := ck.Put(key, value, version)
+	err := ck.Put(key, value, context)
 	end := int64(time.Since(t0))
 	cfg.OpInc()
 	if log != nil {
 		log.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: uint64(version)},
+			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: context.Counter()},
 			Output:   models.KvOutput{Err: string(err)},
 			Call:     start,
 			Return:   end,
@@ -140,7 +140,7 @@ func checkPorcupine(t *testing.T, opLog *OpLog, nsec time.Duration) {
 }
 
 // Porcupine
-func (ts *Test) Get(ck IKVClerk, key string, cli int) (string, rpc.Tversion, rpc.Err) {
+func (ts *Test) Get(ck IKVClerk, key string, cli int) (string, rpc.Context, rpc.Err) {
 	start := int64(time.Since(t0))
 	val, ver, err := ck.Get(key)
 	end := int64(time.Since(t0))
@@ -148,7 +148,7 @@ func (ts *Test) Get(ck IKVClerk, key string, cli int) (string, rpc.Tversion, rpc
 	if ts.oplog != nil {
 		ts.oplog.Append(porcupine.Operation{
 			Input:    models.KvInput{Op: 0, Key: key},
-			Output:   models.KvOutput{Value: val, Version: uint64(ver), Err: string(err)},
+			Output:   models.KvOutput{Value: val, Version: ver.Counter(), Err: string(err)},
 			Call:     start,
 			Return:   end,
 			ClientId: cli,
@@ -158,13 +158,13 @@ func (ts *Test) Get(ck IKVClerk, key string, cli int) (string, rpc.Tversion, rpc
 }
 
 // Porcupine
-func (ts *Test) Put(ck IKVClerk, key string, value string, version rpc.Tversion, cli int) rpc.Err {
+func (ts *Test) Put(ck IKVClerk, key string, value string, context rpc.Context, cli int) rpc.Err {
 	start := int64(time.Since(t0))
-	err := ck.Put(key, value, version)
+	err := ck.Put(key, value, context)
 	end := int64(time.Since(t0))
 	if ts.oplog != nil {
 		ts.oplog.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: uint64(version)},
+			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: context.Counter()},
 			Output:   models.KvOutput{Err: string(err)},
 			Call:     start,
 			Return:   end,

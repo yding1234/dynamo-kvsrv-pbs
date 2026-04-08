@@ -2,8 +2,8 @@ package kvsrv
 
 import (
 	"6.5840/chr"
-	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
+	"6.5840/kvsrv1/rpc"
 	"6.5840/tester1"
 )
 
@@ -19,15 +19,15 @@ func MakeClerk(clnt *tester.Clnt, ring *chr.ConsistentHashRing) kvtest.IKVClerk 
 	return ck
 }
 
-func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+func (ck *Clerk) Get(key string) (string, rpc.Context, rpc.Err) {
 	return ck.CoordGet(key)
 }
 
-func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	return ck.CoordPut(key, value, version)
+func (ck *Clerk) Put(key, value string, context rpc.Context) rpc.Err {
+	return ck.CoordPut(key, value, context)
 }
 
-func (ck *Clerk) CoordGet(key string) (string, rpc.Tversion, rpc.Err) {
+func (ck *Clerk) CoordGet(key string) (string, rpc.Context, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
 
@@ -41,17 +41,17 @@ func (ck *Clerk) CoordGet(key string) (string, rpc.Tversion, rpc.Err) {
 		}
 	}
 	if !ok {
-		return "", 0, rpc.ErrReadQuorumNotMet
+		return "", rpc.ZeroContext(), rpc.ErrRPCFailure
 	}
-	if reply.Err == rpc.ErrNoKey {
-		return "", 0, reply.Err
+	if reply.Err != rpc.OK {
+		return "", rpc.ZeroContext(), reply.Err // return corresponding error
 	}
-
-	return reply.Value, reply.Version, reply.Err // success, return OK
+	return reply.Value, reply.Context, reply.Err // success, return OK
 }
 
-func (ck *Clerk) CoordPut(key, value string, version rpc.Tversion) rpc.Err {
-	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+
+func (ck *Clerk) CoordPut(key, value string, context rpc.Context) rpc.Err {
+	args := rpc.PutArgs{Key: key, Value: value, Context: context}
 	reply := rpc.PutReply{}
 
 	const maxRetry = 3

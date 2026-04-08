@@ -1,34 +1,67 @@
 package vclock
 
 type VClock struct {
-	clocks map[string]uint64 // node name -> counter value
+	Clocks map[string]uint64 // node name -> counter/version value
 }
 
 const (
-	Equal      = iota // 0
-	Before            // 1
-	After             // 2
-	Concurrent        // 3
+	Equal      = 0
+	Before     = -1
+	After      = 1
+	Concurrent = 2
 )
 
 func NewVClock() *VClock {
-	return &VClock{clocks: make(map[string]uint64)}
+	return &VClock{Clocks: make(map[string]uint64)}
 }
 
 func (v *VClock) Increment(node string) {
-	v.clocks[node] = v.clocks[node] + 1
+	if v.Clocks == nil {
+		v.Clocks = make(map[string]uint64)
+	}
+	v.Clocks[node] = v.Clocks[node] + 1
+}
+
+func (v *VClock) SetVersion(node string, version uint64) {
+	if v.Clocks == nil {
+		v.Clocks = make(map[string]uint64)
+	}
+	v.Clocks[node] = version
 }
 
 func (v *VClock) GetAllNodes(other *VClock) map[string]struct{} {
 	// get all the nodes in the vclock
 	nodes := make(map[string]struct{})
-	for node := range v.clocks {
+	for node := range v.Clocks {
 		nodes[node] = struct{}{}
 	}
-	for node := range other.clocks {
+	for node := range other.Clocks {
 		nodes[node] = struct{}{}
 	}
 	return nodes
+}
+
+func (v *VClock) GetNodes() []string {
+	nodes := make([]string, 0, len(v.Clocks))
+	for node := range v.Clocks {
+		nodes = append(nodes, node)
+	}
+	return nodes
+}
+
+func (v *VClock) GetVersion(node string) uint64 {
+	if v.Clocks == nil {
+		return 0
+	}
+	return v.Clocks[node]
+}
+
+func (v *VClock) Copy() *VClock {
+	cp := NewVClock()
+	for node, ver := range v.Clocks {
+		cp.Clocks[node] = ver
+	}
+	return cp
 }
 
 func (v *VClock) Compare(other *VClock) int {
@@ -38,9 +71,9 @@ func (v *VClock) Compare(other *VClock) int {
 	nodes := v.GetAllNodes(other)
 
 	for node := range nodes {
-		if v.clocks[node] < other.clocks[node] {
+		if v.Clocks[node] < other.Clocks[node] {
 			hasBefore = true
-		} else if v.clocks[node] > other.clocks[node] {
+		} else if v.Clocks[node] > other.Clocks[node] {
 			hasAfter = true
 		}
 		if hasBefore && hasAfter {
@@ -61,6 +94,6 @@ func (v *VClock) Compare(other *VClock) int {
 func (v *VClock) Merge(other *VClock) {
 	nodes := v.GetAllNodes(other)
 	for node := range nodes {
-		v.clocks[node] = max(v.clocks[node], other.clocks[node])
+		v.Clocks[node] = max(v.Clocks[node], other.Clocks[node])
 	}
 }

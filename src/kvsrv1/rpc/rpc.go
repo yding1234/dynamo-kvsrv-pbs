@@ -1,8 +1,13 @@
 package rpc
 
+import "6.5840/kvsrv1/meta"
+
 type Err string
 
 const (
+	// RPC error
+	ErrRPCFailure = "ErrRPCFailure"
+
 	// Err's returned by server and Clerk
 	OK         = "OK"
 	ErrNoKey   = "ErrNoKey"
@@ -17,12 +22,16 @@ const (
     ErrWriteQuorumNotMet = "ErrWriteQuorumNotMet"
 )
 
-type Tversion uint64
+type Context = meta.Context
+type Tversion = Context // backward compatibility during migration
+
+func ZeroContext() Context { return meta.ZeroContext() }
+func ContextFromCounter(counter uint64) Context { return meta.ContextFromCounter(counter) }
 
 type PutArgs struct {
 	Key     string
 	Value   string
-	Version Tversion
+	Context Context
 }
 
 type PutReply struct {
@@ -35,6 +44,6 @@ type GetArgs struct {
 
 type GetReply struct {
 	Value   string
-	Version Tversion
+	Context Context
 	Err     Err
 }

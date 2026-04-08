@@ -20,7 +20,7 @@ func TestReliablePut(t *testing.T) {
 	ts.Begin("One client and reliable Put")
 
 	ck := ts.MakeClerk()
-	if err := ck.Put("k", Val, Ver); err != rpc.OK {
+	if err := ck.Put("k", Val, rpc.ContextFromCounter(Ver)); err != rpc.OK {
 		t.Fatalf("Put err %v", err)
 	}
 
@@ -28,15 +28,15 @@ func TestReliablePut(t *testing.T) {
 		t.Fatalf("Get err %v; expected OK", err)
 	} else if val != Val {
 		t.Fatalf("Get value err %v; expected %v", val, Val)
-	} else if ver != Ver+1 {
-		t.Fatalf("Get wrong version %v; expected %v", ver, Ver+1)
+	} else if ver.Counter() != Ver+1 {
+		t.Fatalf("Get wrong version %v; expected %v", ver.Counter(), Ver+1)
 	}
 
-	if err := ck.Put("k", Val, 0); err != rpc.ErrVersion {
+	if err := ck.Put("k", Val, rpc.ZeroContext()); err != rpc.ErrVersion {
 		t.Fatalf("expected Put to fail with ErrVersion; got err=%v", err)
 	}
 
-	if err := ck.Put("y", Val, rpc.Tversion(1)); err != rpc.ErrNoKey {
+	if err := ck.Put("y", Val, rpc.ContextFromCounter(1)); err != rpc.ErrNoKey {
 		t.Fatalf("expected Put to fail with ErrNoKey; got err=%v", err)
 	}
 
@@ -85,7 +85,7 @@ func TestMemPutManyClientsReliable(t *testing.T) {
 
 	// force allocation of ends for server in each client
 	for i := 0; i < NCLIENT; i++ {
-		if err := cks[i].Put("k", "", 1); err != rpc.ErrNoKey {
+		if err := cks[i].Put("k", "", rpc.ContextFromCounter(1)); err != rpc.ErrNoKey {
 			t.Fatalf("Put failed %v", err)
 		}
 	}
@@ -98,7 +98,7 @@ func TestMemPutManyClientsReliable(t *testing.T) {
 	m0 := ts.Config.Group(0).MemSize()
 
 	for i := 0; i < NCLIENT; i++ {
-		if err := cks[i].Put("k", v, rpc.Tversion(i)); err != rpc.OK {
+		if err := cks[i].Put("k", v, rpc.ContextFromCounter(uint64(i))); err != rpc.OK {
 			t.Fatalf("Put failed %v", err)
 		}
 	}
@@ -122,22 +122,22 @@ func TestUnreliableNet(t *testing.T) {
 
 	ck := ts.MakeClerk()
 
-	readVersion := func() rpc.Tversion {
+	readVersion := func() rpc.Context {
 		for i := 0; i < 30; i++ {
 			_, ver, err := ck.Get("k")
 			if err == rpc.OK {
 				return ver
 			}
 			if err == rpc.ErrNoKey {
-				return 0
+				return rpc.ZeroContext()
 			}
-			if err == rpc.ErrReadQuorumNotMet || err == rpc.ErrNotCoordinator {
+			if err == rpc.ErrReadQuorumNotMet || err == rpc.ErrNotCoordinator || err == rpc.ErrRPCFailure {
 				continue
 			}
 			t.Fatalf("Get failed with unexpected err=%v", err)
 		}
 		t.Fatalf("Get did not reach read quorum after retries")
-		return 0
+		return rpc.ZeroContext()
 	}
 
 	sawQuorumFail := false

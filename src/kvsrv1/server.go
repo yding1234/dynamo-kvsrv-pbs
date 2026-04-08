@@ -25,7 +25,7 @@ type KVServer struct {
 
 	id       string
 	kv       map[string]string
-	versions map[string]rpc.Tversion // version of the key
+	contexts map[string]rpc.Context // key -> context
 
 	// for consistent hashing
 	ring        *chr.ConsistentHashRing
@@ -40,7 +40,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	writeQuorum int, readQuorum int, ends map[string]*labrpc.ClientEnd) *KVServer {
 	kv := &KVServer{id: serverID,
 		kv:          make(map[string]string),
-		versions:    make(map[string]rpc.Tversion),
+		contexts:    make(map[string]rpc.Context),
 		ring:        ring,
 		writeQuorum: writeQuorum,
 		readQuorum:  readQuorum,
@@ -93,9 +93,9 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		}
 		if res.reply.Err == rpc.OK {
 			okCount++
-			if reply.Err != rpc.OK || res.reply.Version > reply.Version {
+			if reply.Err != rpc.OK || res.reply.Context.Counter() > reply.Context.Counter() {
 				reply.Value = res.reply.Value
-				reply.Version = res.reply.Version
+				reply.Context = res.reply.Context
 			}
 		} else if res.reply.Err == rpc.ErrNoKey {
 			noKeyCount++
@@ -136,7 +136,7 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 
 	for _, serverID := range prefList {
 		go func(serverID string) {
-			repArgs := &rpc.PutArgs{Key: args.Key, Value: args.Value, Version: args.Version}
+			repArgs := &rpc.PutArgs{Key: args.Key, Value: args.Value, Context: args.Context}
 			repReply := rpc.PutReply{}
 			ok := kv.ends[serverID].Call("KVServer.ReplicaPut", repArgs, &repReply)
 			if !ok {
@@ -177,7 +177,7 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 }
 
-// Get returns the value and version for args.Key, if args.Key
+// Get returns the value and context for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here.
@@ -190,34 +190,34 @@ func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		return
 	}
 	reply.Value = value
-	reply.Version = kv.versions[args.Key]
+	reply.Context = kv.contexts[args.Key]
 	reply.Err = rpc.OK
 	return
 }
 
-// Update the value for a key if args.Version matches the version of
+// Update the value for a key if args.Context matches the context of
 // the key on the server. If versions don't match, return ErrVersion.
 // If the key doesn't exist, Put installs the value if the
-// args.Version is 0, and returns ErrNoKey otherwise.
+// args.Context is zero, and returns ErrNoKey otherwise.
 func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
 	_, ok := kv.kv[args.Key]
-	//if the key doesn't exist and the version is not 0, return ErrNoKey
-	if !ok && args.Version != 0 {
+	// if the key doesn't exist and the context counter is not 0, return ErrNoKey
+	if !ok && args.Context.Counter() != 0 {
 		reply.Err = rpc.ErrNoKey
 		return
 	}
 	// if the key exists and the version doesn't match, return ErrVersion
-	if ok && args.Version != kv.versions[args.Key] {
+	if ok && args.Context.Counter() != kv.contexts[args.Key].Counter() {
 		reply.Err = rpc.ErrVersion
 		return
 	}
 	// otherwise, install the value
 	kv.kv[args.Key] = args.Value
-	kv.versions[args.Key] = args.Version + 1
+	kv.contexts[args.Key] = args.Context.Next()
 	reply.Err = rpc.OK
 	return
 }

@@ -68,7 +68,7 @@ func oneClient(t *testing.T, me int, ck kvtest.IKVClerk,
 	lk1.Release()
 	lk2.Release()
 
-	ck.Put("l0", "", 0)
+	ck.Put("l0", "", rpc.ZeroContext())
 	for i := 1; true; i++ {
 		select {
 		case <-done:
@@ -95,7 +95,7 @@ func oneClient(t *testing.T, me int, ck kvtest.IKVClerk,
 
 			time.Sleep(10 * time.Millisecond)
 
-			err = ck.Put("l0", "", ver+1)
+			err = ck.Put("l0", "", ver.Next())
 			if !(err == rpc.OK || err == rpc.ErrMaybe) {
 				t.Fatalf("%d: put failed %v", me, err)
 			}
