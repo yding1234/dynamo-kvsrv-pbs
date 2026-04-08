@@ -16,15 +16,15 @@ func ServerName(gid Tgid, i int) string {
 	return "server-" + strconv.Itoa(int(gid)) + "-" + strconv.Itoa(i)
 }
 
-// The tester may have many groups of servers (e.g., one per Raft group).
+// The tester may have many groups of servers
 // Groups are named 0, 1, and so on.
 type Groups struct {
 	mu      sync.Mutex
 	net     *labrpc.Network
 	prog    string
-	args    []string
-	endName string
-	grps    map[Tgid]*ServerGrp
+	args    []string // arguments to daemon program
+	endName string // endpoint name of the tester
+	grps    map[Tgid]*ServerGrp // gid --> ServerGrp
 }
 
 func newGroups(net *labrpc.Network, prog string, args []string, endName string) *Groups {
@@ -67,7 +67,7 @@ type ServerGrp struct {
 	args        []string
 	srvs        []*Server
 	servernames []string
-	endName     string
+	endName     string // endpoint name of the tester
 	gid         Tgid
 	connected   []bool // whether each server is on the net
 	mu          sync.Mutex
@@ -93,6 +93,7 @@ func makeSrvGrp(net *labrpc.Network, prog string, args []string, endName string,
 	return sg
 }
 
+// get the number of servers in the group
 func (sg *ServerGrp) N() int {
 	return len(sg.srvs)
 }
@@ -105,6 +106,7 @@ func (sg *ServerGrp) SrvName(i int) string {
 	return sg.servernames[i]
 }
 
+// get the server names for the given servers
 func (sg *ServerGrp) SrvNamesTo(to []int) []string {
 	ns := make([]string, 0, len(to))
 	for _, i := range to {
@@ -113,6 +115,7 @@ func (sg *ServerGrp) SrvNamesTo(to []int) []string {
 	return ns
 }
 
+// get all the server indices
 func (sg *ServerGrp) all() []int {
 	all := make([]int, len(sg.srvs))
 	for i, _ := range sg.srvs {
@@ -131,13 +134,14 @@ func (sg *ServerGrp) ConnectOne(i int) {
 	sg.connect(i, sg.all())
 }
 
+// kill the servers in the given list
 func (sg *ServerGrp) Kill(srvs []int) {
 	for _, srv := range srvs {
 		sg.ShutdownServer(srv)
 	}
 }
 
-// attach server i to servers listed in to caller must hold cfg.mu.
+// attach server i to servers listed in to, direction : i <--> to
 func (sg *ServerGrp) connect(i int, to []int) {
 	//log.Printf("connect peer %d to %v\n", i, to)
 
@@ -150,7 +154,7 @@ func (sg *ServerGrp) connect(i int, to []int) {
 	for j := 0; j < len(to); j++ {
 		if sg.IsConnected(to[j]) {
 			//log.Printf("connect %d (%v) to %d", to[j], sg.srvs[to[j]].endNames[i], i)
-			endname := sg.srvs[to[j]].endNames[i]
+			endname := sg.srvs[to[j]].endNames[i] // my end name in the server to connect to
 			sg.net.Enable(endname, true)
 		}
 	}
@@ -182,6 +186,7 @@ func (sg *ServerGrp) disconnect(i int, from []int) {
 func (sg *ServerGrp) DisconnectAll(i int) {
 	sg.disconnect(i, sg.all())
 }
+
 
 func (sg *ServerGrp) IsConnected(i int) bool {
 	defer sg.mu.Unlock()
@@ -229,6 +234,7 @@ func (sg *ServerGrp) SnapshotSize() int {
 }
 
 // If restart servers, first call shutdownserver
+// TODO: read later
 func (sg *ServerGrp) StartServer(i int) error {
 	srv := sg.srvs[i].startServer(sg.gid)
 	sg.srvs[i] = srv
@@ -238,6 +244,9 @@ func (sg *ServerGrp) StartServer(i int) error {
 	labsrv := labrpc.MakeServer()
 
 	// start a process to run server
+	// sg.endName is the endpoint name of the tester which the daemon will connect to
+	// srv.endNames is used to server-to-server/client-to-server connnect through Unix socket
+	// dc is the daemon client to the server
 	dc, err := runDaemon(sg.net, sg.prog, sg.args, sg.endName, sg.gid, i, srv.endNames)
 	if err != nil {
 		log.Printf("runDaemon err %v", err)
@@ -322,6 +331,7 @@ func (sg *ServerGrp) Partition(p1 []int, p2 []int) {
 	}
 }
 
+// get the number of RPCs sent to the given server
 func (sg *ServerGrp) RpcCount(server int) int {
 	return sg.net.GetCount(ServerName(sg.gid, server))
 }

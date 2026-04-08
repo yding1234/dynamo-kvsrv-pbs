@@ -18,38 +18,43 @@ import (
 	"6.5840/labrpc"
 )
 
-const GRP0 = 0
+const GRP0 = 0 // ID of group 0
 
 type Config struct {
 	*Clnts  // The clnts in the test
 	*Groups // The server groups in the test
 
-	t   *testing.T
+	t   *testing.T // The pointer to the testing object
 	net *labrpc.Network // The network shared by clnts and servers
 
 	start time.Time // time at which make_config() was called
 	// begin()/end() statistics
 	t0    time.Time // time at which test_test.go called cfg.begin()
 	rpcs0 int       // rpcTotal() at start of test
-	ops   int32     // number of clerk get/put/append method calls
+	ops   int32     // number of clerk get/put method calls
 
-	endName string // name of tester
+	endName string // endpoint name of tester
 
-	trpc *TesterRPC
+	trpc *TesterRPC // The tester RPC server
 }
 
+
+// prog : the program to run, must be under src/main/ and confer to the program name in the deamon protocol
+// if prog is "kvsrv1", then the tester will run the src/main/kvsrv1 program
+// n: the number of servers in the group 0
 func MakeConfig(t *testing.T, n int, reliable bool, prog string, args []string) *Config {
-	ncpu_once.Do(func() {
+	ncpu_once.Do(func() { // initialize the random seed
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
 		}
 		rand.Seed(makeSeed())
 	})
-	runtime.GOMAXPROCS(4)
+	runtime.GOMAXPROCS(4) // set the number of CPUs to 4
+
 	cfg := &Config{}
 	cfg.t = t
 	cfg.net = labrpc.MakeNetwork()
-	cfg.endName = Randstring(20)
+	cfg.endName = Randstring(20) 
 	cfg.trpc = newTesterRPCSrv(cfg)
 	cfg.Groups = newGroups(cfg.net, prog, args, cfg.endName)
 	cfg.MakeGroupStart(prog, args, GRP0, n)
@@ -75,10 +80,12 @@ func (cfg *Config) SetLongDelays(longdel bool) {
 	cfg.net.LongDelays(longdel)
 }
 
+// get the server group with the given ID
 func (cfg *Config) Group(gid Tgid) *ServerGrp {
 	return cfg.lookupGroup(gid)
 }
 
+// ?what is a service?
 func (cfg *Config) AddService(svc any) {
 	if cfg.trpc != nil {
 		cfg.trpc.AddService(svc)
@@ -99,6 +106,7 @@ func (cfg *Config) Cleanup() {
 	}
 }
 
+// nsrv: the number of servers in the group
 func (cfg *Config) MakeGroupStart(prog string, args []string, gid Tgid, nsrv int) {
 	cfg.MakeGroup(prog, args, gid, nsrv)
 	cfg.Group(gid).StartServers()
@@ -109,12 +117,15 @@ func (cfg *Config) ExitGroup(gid Tgid) {
 	cfg.Groups.delete(gid)
 }
 
+// ?what does this do?
 var ncpu_once sync.Once
 
+// get the total number of RPCs sent
 func (cfg *Config) RpcTotal() int {
 	return cfg.net.GetTotalCount()
 }
 
+// get the total number of bytes sent
 func (cfg *Config) BytesTotal() int64 {
 	return cfg.net.GetTotalBytes()
 }
@@ -130,7 +141,7 @@ func (cfg *Config) Begin(description string) {
 	fmt.Printf("%s (%s network)...\n", description, rel)
 	cfg.t0 = time.Now()
 	cfg.rpcs0 = cfg.RpcTotal()
-	atomic.StoreInt32(&cfg.ops, 0)
+	atomic.StoreInt32(&cfg.ops, 0) // reset the number of clerk get/put method calls
 }
 
 func (cfg *Config) OpInc() {
@@ -152,6 +163,8 @@ func (cfg *Config) End() {
 	}
 }
 
+// print the Fatal message and the stack trace
+// TODO: read later
 func (cfg *Config) Fatalf(format string, args ...any) {
 	const maxStackLen = 50
 	fmt.Printf("Fatal: ")
@@ -198,6 +211,7 @@ func makeSeed() int64 {
 }
 
 // Randomize server handles
+// ?why shuffle the server handles?
 func random_handles(kvh []*labrpc.ClientEnd) []*labrpc.ClientEnd {
 	sa := make([]*labrpc.ClientEnd, len(kvh))
 	copy(sa, kvh)

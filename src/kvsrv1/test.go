@@ -1,6 +1,7 @@
 package kvsrv
 
-// go test ./kvsrv1 -v
+// go test ./kvsrv1/...  -v
+// make kvsrv1
 
 import (
 	// "log"
@@ -44,7 +45,7 @@ func (ts *TestKV) MakeClerk() kvtest.IKVClerk {
 		nodeIDs = append(nodeIDs, tester.ServerName(tester.GRP0, i))
 	}
 	ring := chr.MakeConsistentHashRing(numReplicas, numSectors, numServers, nodeIDs)
-	ck := MakeClerk(clnt, ring, readQuorum, writeQuorum)
+	ck := MakeClerk(clnt, ring)
 	return &kvtest.TestClerk{ck, clnt, ts.Test.Config}
 }
 
@@ -52,3 +53,5 @@ func (ts *TestKV) DeleteClerk(ck kvtest.IKVClerk) {
 	tck := ck.(*kvtest.TestClerk)
 	ts.DeleteClient(tck.Clnt)
 }
+
+

@@ -1,8 +1,6 @@
 package tester
 
 import (
-	//"log"
-
 	"6.5840/tester1/sockrpc"
 )
 

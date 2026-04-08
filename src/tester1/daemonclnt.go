@@ -1,7 +1,6 @@
 package tester
 
 import (
-	"flag"
 	"log"
 	"os"
 	"os/exec"
@@ -19,24 +18,25 @@ import (
 // Tester side to interact with server daemons
 //
 
-var MaxRaftState int
-var UseRaftStateMachine bool // to plug in another raft besided raft1
+// var MaxRaftState int
+// Optional flags for non-kv labs; keep false for kvsrv.
+var UseRaftStateMachine bool
 
-func init() {
-	flag.BoolVar(&UseRaftStateMachine, "raft-state-machine", false, "use raft state machine")
-	flag.IntVar(&MaxRaftState, "max-raft-state", -1, "max raft state")
-}
+// func init() {
+// 	flag.BoolVar(&UseRaftStateMachine, "raft-state-machine", false, "use raft state machine")
+// 	flag.IntVar(&MaxRaftState, "max-raft-state", -1, "max raft state")
+// }
 
 type DaemonClnt struct {
 	mu       sync.Mutex
-	srv      int
-	server   string
-	endName  string
+	srv      int // server index
+	server   string // server name
+	endName  string // endpoint name of the daemon, used to connect to the tester
 	cmd      *exec.Cmd
-	rpcc     *sockrpc.RPCClnt
-	rpccClnt *sockrpc.RPCClnt
-	dmxclnt  *demux.DemuxClnt
-	clnt     *Clnt
+	rpcc     *sockrpc.RPCClnt // for forwarding requests to the daemon from the tester
+	rpccClnt *sockrpc.RPCClnt // for sending daemon life-cycle RPCs to the daemon
+	dmxclnt  *demux.DemuxClnt // for demultiplexing requests to the server from the daemon
+	clnt     *Clnt // for forwarding KV requests to the server from the daemon
 }
 
 // path to daemon's binary
