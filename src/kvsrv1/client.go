@@ -5,6 +5,7 @@ import (
 	"6.5840/kvtest1"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/tester1"
+	"6.5840/vclock"
 )
 
 type Clerk struct {
@@ -46,7 +47,11 @@ func (ck *Clerk) CoordGet(key string) (string, rpc.Context, rpc.Err) {
 	if reply.Err != rpc.OK {
 		return "", rpc.ZeroContext(), reply.Err // return corresponding error
 	}
-	return reply.Value, reply.Context, reply.Err // success, return OK
+	if len(reply.Objects) == 0 {
+		return "", rpc.ZeroContext(), rpc.ErrNoKey
+	}
+	latest := pickLatestObject(reply.Objects)
+	return latest.Value, latest.Context, reply.Err // single-value compatibility for kvtest
 }
 
 
@@ -75,4 +80,20 @@ func (ck *Clerk) CoordPut(key, value string, context rpc.Context) rpc.Err {
 	}
 
 	return reply.Err // return OK or ErrNokey
+}
+
+func pickLatestObject(objects []rpc.Object) rpc.Object {
+	best := objects[0]
+	for _, obj := range objects[1:] {
+		cmp := obj.Context.Compare(best.Context)
+		if cmp == vclock.After {
+			best = obj
+			continue
+		}
+		// If causally concurrent/equal, resolve by latest timestamp.
+		if (cmp == vclock.Concurrent || cmp == vclock.Equal) && obj.Context.Timestamp > best.Context.Timestamp {
+			best = obj
+		}
+	}
+	return best
 }

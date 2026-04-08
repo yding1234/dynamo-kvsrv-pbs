@@ -42,8 +42,12 @@ type GetArgs struct {
 	Key string
 }
 
-type GetReply struct {
+type Object struct {
 	Value   string
 	Context Context
+}
+
+type GetReply struct {
+	Objects []Object
 	Err     Err
 }

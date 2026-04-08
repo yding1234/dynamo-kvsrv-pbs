@@ -8,6 +8,7 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/tester1"
+	"6.5840/vclock"
 )
 
 const Debug = false
@@ -86,6 +87,7 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 
 	okCount := 0
 	noKeyCount := 0
+	siblings := make([]rpc.Object, 0)
 	for i := 0; i < len(prefList); i++ {
 		res := <-ch
 		if !res.ok {
@@ -93,15 +95,15 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		}
 		if res.reply.Err == rpc.OK {
 			okCount++
-			if reply.Err != rpc.OK || res.reply.Context.Counter() > reply.Context.Counter() {
-				reply.Value = res.reply.Value
-				reply.Context = res.reply.Context
+			for _, obj := range res.reply.Objects {
+				siblings = mergeSiblingObject(siblings, obj)
 			}
 		} else if res.reply.Err == rpc.ErrNoKey {
 			noKeyCount++
 		}
 	}
 	if okCount >= kv.readQuorum {
+		reply.Objects = siblings
 		reply.Err = rpc.OK
 	} else if noKeyCount >= kv.readQuorum {
 		reply.Err = rpc.ErrNoKey
@@ -189,10 +191,43 @@ func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		reply.Err = rpc.ErrNoKey
 		return
 	}
-	reply.Value = value
-	reply.Context = kv.contexts[args.Key]
+	reply.Objects = []rpc.Object{{
+		Value:   value,
+		Context: kv.contexts[args.Key],
+	}}
 	reply.Err = rpc.OK
 	return
+}
+
+func mergeSiblingObject(existing []rpc.Object, candidate rpc.Object) []rpc.Object {
+	keepCandidate := true
+	i := 0
+	for i < len(existing) {
+		cmp := candidate.Context.Compare(existing[i].Context)
+		switch cmp {
+		case vclock.Before:
+			// Candidate is dominated by an existing sibling.
+			keepCandidate = false
+			i = len(existing)
+		case vclock.After:
+			// Candidate dominates this sibling, remove existing[i].
+			existing = append(existing[:i], existing[i+1:]...)
+		case vclock.Equal:
+			// Same causal version, keep the latest by timestamp (LWW tie-breaker).
+			if candidate.Context.Timestamp > existing[i].Context.Timestamp {
+				existing[i] = candidate
+			}
+			keepCandidate = false
+			i = len(existing)
+		default:
+			// Concurrent: keep both.
+			i++
+		}
+	}
+	if keepCandidate {
+		existing = append(existing, candidate)
+	}
+	return existing
 }
 
 // Update the value for a key if args.Context matches the context of
