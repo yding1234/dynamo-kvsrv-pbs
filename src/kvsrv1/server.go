@@ -138,11 +138,13 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 
 	prefList := kv.ring.GetPreferenceList(args.Key)
 	ch := make(chan forwardResult, len(prefList))
-	args.Object.Context.Update(kv.id, args.Object.Value)
+	writeObject := args.Object
+	writeObject.Context = args.BaseContext
+	writeObject.Context.Update(kv.id, writeObject.Value)
 	
 	for _, serverID := range prefList {
 		go func(serverID string) {
-			forwardArgs := rpc.PutArgs{Key: args.Key, Object: args.Object, BaseContext: args.BaseContext}
+			forwardArgs := rpc.PutArgs{Key: args.Key, Object: writeObject, BaseContext: args.BaseContext}
 			forwardReply := rpc.PutReply{}
 			ok := kv.ends[serverID].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
 			if !ok {
@@ -215,7 +217,8 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		return
 	}
 
-	_, added := rpc.AddObject(siblings, rpc.Object{Value: args.Object.Value, Context: args.BaseContext})
+	baseObject := rpc.Object{Value: args.Object.Value, Context: args.BaseContext}
+	_, added := rpc.AddObject(siblings, baseObject)
 	if !added {
 		reply.Err = rpc.ErrVersion
 		return

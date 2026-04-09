@@ -42,53 +42,49 @@ func (ck *Clerk) Put(key, value string, context rpc.Context) rpc.Err {
 
 func (ck *Clerk) CoordGet(key string) ([]rpc.Object, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
-	reply := rpc.GetReply{}
 
 	ok := false
 	for retry := 0; retry < maxRetry; retry++ {
+		reply := rpc.GetReply{}
 		coordinator := ck.ring.GetCoordinator(key)
 		ok = ck.clnt.Call(coordinator, "KVServer.CoordGet", &args, &reply)
 		if ok && reply.Err != rpc.ErrNotCoordinator {
-			break
+			if len(reply.Objects) == 0 {
+				return nil, rpc.ErrNoKey
+			}
+			return reply.Objects, rpc.OK
 		}
 	}
 	if !ok {
 		return nil, rpc.ErrRPCFailure
 	}
-	if reply.Err != rpc.OK {
-		return nil, reply.Err // return corresponding error
-	}
-	if len(reply.Objects) == 0 {
-		return nil, rpc.ErrNoKey
-	}
-	return reply.Objects, rpc.OK
+	return nil, rpc.ErrNotCoordinator
 }
 
 
 func (ck *Clerk) CoordPut(key, value string, context rpc.Context) rpc.Err {
 	args := rpc.PutArgs{Key: key, Object: rpc.Object{Value: value, Context: context}, BaseContext: context}
-	reply := rpc.PutReply{}
 
 	hadRPCFailure := false
 	ok := false
 	for retry := 0; retry < maxRetry; retry++ {
+		reply := rpc.PutReply{}
 		coordinator := ck.ring.GetCoordinator(key)
 		ok = ck.clnt.Call(coordinator, "KVServer.CoordPut", &args, &reply) // retry
 		if !ok {
 			hadRPCFailure = true
 		}
 		if ok && reply.Err != rpc.ErrNotCoordinator {
-			break
+			if reply.Err == rpc.ErrVersion && hadRPCFailure {
+				return rpc.ErrMaybe
+			}
+			return reply.Err // return OK or ErrNokey
 		}
 	}
 	if !ok {
 		return rpc.ErrMaybe
 	}
-	if reply.Err == rpc.ErrVersion && hadRPCFailure {
-		return rpc.ErrMaybe
-	}
-
-	return reply.Err // return OK or ErrNokey
+	return rpc.ErrNotCoordinator
 }
 
 func clientBasedResolution(siblings []rpc.Object) rpc.Object {
