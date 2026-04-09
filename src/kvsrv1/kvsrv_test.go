@@ -256,6 +256,103 @@ func TestConflictSiblingsAndConverge(t *testing.T) {
 	}
 }
 
+// Repeated quorum reads should not invent extra siblings when replicas
+// already store the same sibling set.
+func TestRepeatedReadsDoNotDuplicateSiblings(t *testing.T) {
+	ts := MakeTestKV(t, true)
+	defer ts.Cleanup()
+
+	ts.Begin("Repeated reads keep sibling count stable")
+
+	ck := ts.MakeClerk()
+	tck := ck.(*kvtest.TestClerk)
+
+	const key = "k-stable-siblings"
+	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
+		t.Fatalf("base put failed: %v", err)
+	}
+
+	_, baseCtx, err := ck.Get(key)
+	if err != rpc.OK {
+		t.Fatalf("base get failed: %v", err)
+	}
+
+	ctxA := makeConcurrentContext(baseCtx, "writer-A", 1)
+	ctxB := makeConcurrentContext(baseCtx, "writer-B", 2)
+
+	if err := ck.Put(key, "va", ctxA); err != rpc.OK {
+		t.Fatalf("put A failed: %v", err)
+	}
+	if err := ck.Put(key, "vb", ctxB); err != rpc.OK {
+		t.Fatalf("put B failed: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		raw := rawCoordGet(t, tck, key)
+		if raw.Err != rpc.OK {
+			t.Fatalf("raw get %d failed: err=%v", i, raw.Err)
+		}
+		if got := len(raw.Objects); got != 2 {
+			t.Fatalf("expected 2 siblings after read %d, got %d", i, got)
+		}
+	}
+}
+
+// A write based on a merged context should dominate and remove the old siblings.
+func TestDominatingWriteRemovesOldSiblings(t *testing.T) {
+	ts := MakeTestKV(t, true)
+	defer ts.Cleanup()
+
+	ts.Begin("Dominating write removes old siblings")
+
+	ck := ts.MakeClerk()
+	tck := ck.(*kvtest.TestClerk)
+
+	const key = "k-dominates"
+	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
+		t.Fatalf("base put failed: %v", err)
+	}
+
+	_, baseCtx, err := ck.Get(key)
+	if err != rpc.OK {
+		t.Fatalf("base get failed: %v", err)
+	}
+
+	ctxA := makeConcurrentContext(baseCtx, "writer-A", 1)
+	ctxB := makeConcurrentContext(baseCtx, "writer-B", 2)
+	if err := ck.Put(key, "va", ctxA); err != rpc.OK {
+		t.Fatalf("put A failed: %v", err)
+	}
+	if err := ck.Put(key, "vb", ctxB); err != rpc.OK {
+		t.Fatalf("put B failed: %v", err)
+	}
+
+	rawBefore := rawCoordGet(t, tck, key)
+	if rawBefore.Err != rpc.OK {
+		t.Fatalf("raw get before merge failed: err=%v", rawBefore.Err)
+	}
+	if got := len(rawBefore.Objects); got != 2 {
+		t.Fatalf("expected 2 siblings before dominating write, got %d", got)
+	}
+
+	mergedValue := "resolved"
+	mergedCtx := mergeSiblingContexts(rawBefore.Objects, mergedValue)
+	if err := ck.Put(key, mergedValue, mergedCtx); err != rpc.OK {
+		t.Fatalf("dominating put failed: %v", err)
+	}
+
+	rawAfter := rawCoordGet(t, tck, key)
+	if rawAfter.Err != rpc.OK {
+		t.Fatalf("raw get after merge failed: err=%v", rawAfter.Err)
+	}
+	if got := len(rawAfter.Objects); got != 1 {
+		t.Fatalf("expected 1 sibling after dominating write, got %d", got)
+	}
+	if rawAfter.Objects[0].Value != mergedValue {
+		t.Fatalf("expected dominating value %q, got %q", mergedValue, rawAfter.Objects[0].Value)
+	}
+}
+
 func makeConcurrentContext(base rpc.Context, writer string, tsBump uint64) rpc.Context {
 	ctx := cloneContext(base)
 	ctx.VC.SetVersion(writer, ctx.VC.GetVersion(writer)+1)
