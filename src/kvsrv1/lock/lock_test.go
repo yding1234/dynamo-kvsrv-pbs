@@ -12,6 +12,19 @@ import (
 	"6.5840/kvtest1"
 )
 
+const testContextNode = "__test__"
+
+func zeroContext() rpc.Context {
+	return rpc.NewContext()
+}
+
+func nextContext(ctx rpc.Context, value string) rpc.Context {
+	next := ctx
+	next.VC = ctx.VC.Copy()
+	next.Update(testContextNode, value)
+	return next
+}
+
 const (
 	NACQUIRE = 10
 	NCLNT    = 10
@@ -68,7 +81,7 @@ func oneClient(t *testing.T, me int, ck kvtest.IKVClerk,
 	lk1.Release()
 	lk2.Release()
 
-	ck.Put("l0", "", rpc.ZeroContext())
+	ck.Put("l0", "", zeroContext())
 	for i := 1; true; i++ {
 		select {
 		case <-done:
@@ -95,7 +108,7 @@ func oneClient(t *testing.T, me int, ck kvtest.IKVClerk,
 
 			time.Sleep(10 * time.Millisecond)
 
-			err = ck.Put("l0", "", ver.Next())
+			err = ck.Put("l0", "", nextContext(ver, string(b)))
 			if !(err == rpc.OK || err == rpc.ErrMaybe) {
 				t.Fatalf("%d: put failed %v", me, err)
 			}

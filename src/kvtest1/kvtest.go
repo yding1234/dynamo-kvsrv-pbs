@@ -11,6 +11,7 @@ import (
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/tester1"
+	"6.5840/vclock"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -28,12 +29,33 @@ func RandValue(n int) string {
 	return string(b)
 }
 
+const testContextNode = "__test__"
+
 func ctx(counter uint64) rpc.Context {
-	return rpc.ContextFromCounter(counter)
+	vc := vclock.NewVClock()
+	if counter > 0 {
+		vc.SetVersion(testContextNode, counter)
+	}
+	return rpc.NewContextFromVClock(vc)
+}
+
+func zeroContext() rpc.Context {
+	return rpc.NewContext()
 }
 
 func counter(c rpc.Context) uint64 {
-	return c.Counter()
+	var total uint64
+	for _, ver := range c.VC {
+		total += ver
+	}
+	return total
+}
+
+func nextContext(c rpc.Context, value string) rpc.Context {
+	next := c
+	next.VC = c.VC.Copy()
+	next.Update(testContextNode, value)
+	return next
 }
 
 type IKVClerk interface {
@@ -102,11 +124,11 @@ func (ts *Test) PutAtLeastOnce(ck IKVClerk, key, value string, ver rpc.Context, 
 	for true {
 		err := ts.Put(ck, key, value, ver, me)
 		if err == rpc.OK {
-			ver = ver.Next()
+			ver = nextContext(ver, value)
 			break
 		}
 		if err == rpc.ErrMaybe || err == rpc.ErrVersion {
-			ver = ver.Next()
+			ver = nextContext(ver, value)
 		} else {
 			// if failed with ver = 0, retry
 			if counter(ver) != 0 { // check that ver is indeed 0
@@ -195,7 +217,7 @@ func (ts *Test) GetJson(ck IKVClerk, key string, me int, v any) rpc.Context {
 		return ver
 	} else {
 		ts.Fatalf("%d: Get %q err %v", me, key, err)
-		return rpc.ZeroContext()
+		return zeroContext()
 	}
 }
 
@@ -208,11 +230,17 @@ func (ts *Test) PutJson(ck IKVClerk, key string, v any, ver rpc.Context, me int)
 }
 
 func (ts *Test) PutAtLeastOnceJson(ck IKVClerk, key string, value any, ver rpc.Context, me int) rpc.Context {
+	b, err := json.Marshal(value)
+	if err != nil {
+		ts.Fatalf("%d: marshal %v", me, err)
+	}
+	jsonValue := string(b)
+
 	for true {
-		if err := ts.PutJson(ck, key, value, rpc.ZeroContext(), me); err != rpc.ErrMaybe {
+		if err := ts.Put(ck, key, jsonValue, zeroContext(), me); err != rpc.ErrMaybe {
 			break
 		}
-		ver = ver.Next()
+		ver = nextContext(ver, jsonValue)
 	}
 	return ver
 }
@@ -242,7 +270,7 @@ func (ts *Test) OnePut(me int, ck IKVClerk, key string, ver rpc.Context) (rpc.Co
 			return ver, err == rpc.OK
 		}
 	}
-	return rpc.ZeroContext(), false
+	return zeroContext(), false
 }
 
 // repartition the servers periodically
@@ -279,7 +307,7 @@ func (ts *Test) OneClientPut(cli int, ck IKVClerk, ka []string, done chan struct
 	res := ClntRes{}
 	verm := make(map[string]rpc.Context)
 	for _, k := range ka {
-		verm[k] = rpc.ZeroContext()
+		verm[k] = zeroContext()
 	}
 	ok := false
 	for true {
@@ -315,7 +343,7 @@ func (ts *Test) SpreadPutsSize(ck IKVClerk, n, valsz int) ([]string, []string) {
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
 		va[i] = tester.Randstring(valsz)
-		ck.Put(ka[i], va[i], rpc.ZeroContext())
+		ck.Put(ka[i], va[i], zeroContext())
 	}
 	for i := 0; i < n; i++ {
 		ts.CheckGet(ck, ka[i], va[i], ctx(1))

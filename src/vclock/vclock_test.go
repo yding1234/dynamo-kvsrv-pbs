@@ -4,10 +4,10 @@ package vclock
 
 import "testing"
 
-func makeClock(vals map[string]uint64) *VClock {
+func makeClock(vals map[string]uint64) VClock {
 	v := NewVClock()
 	for n, c := range vals {
-		v.Clocks[n] = c
+		v[n] = c
 	}
 	return v
 }
@@ -17,16 +17,16 @@ func TestNewVClockAndIncrement(t *testing.T) {
 	if v == nil {
 		t.Fatalf("NewVClock returned nil")
 	}
-	if len(v.Clocks) != 0 {
-		t.Fatalf("new clock should be empty, got %d entries", len(v.Clocks))
+	if len(v) != 0 {
+		t.Fatalf("new clock should be empty, got %d entries", len(v))
 	}
 
 	v.Increment("A")
 	v.Increment("A")
 	v.Increment("B")
 
-	if v.Clocks["A"] != 2 || v.Clocks["B"] != 1 {
-		t.Fatalf("unexpected counters: A=%d B=%d", v.Clocks["A"], v.Clocks["B"])
+	if v["A"] != 2 || v["B"] != 1 {
+		t.Fatalf("unexpected counters: A=%d B=%d", v["A"], v["B"])
 	}
 }
 
@@ -94,11 +94,11 @@ func TestMergeTakesMaxPerNode(t *testing.T) {
 	a.Merge(b)
 
 	want := map[string]uint64{"A": 3, "B": 5, "C": 2}
-	if len(a.Clocks) != len(want) {
-		t.Fatalf("merge size mismatch: got %d want %d", len(a.Clocks), len(want))
+	if len(a) != len(want) {
+		t.Fatalf("merge size mismatch: got %d want %d", len(a), len(want))
 	}
 	for n, w := range want {
-		if got := a.Clocks[n]; got != w {
+		if got := a[n]; got != w {
 			t.Fatalf("node %q merged counter mismatch: got %d want %d", n, got, w)
 		}
 	}

@@ -1,7 +1,5 @@
 package rpc
 
-import "6.5840/kvsrv1/meta"
-
 type Err string
 
 const (
@@ -22,16 +20,10 @@ const (
     ErrWriteQuorumNotMet = "ErrWriteQuorumNotMet"
 )
 
-type Context = meta.Context
-type Tversion = Context // backward compatibility during migration
-
-func ZeroContext() Context { return meta.ZeroContext() }
-func ContextFromCounter(counter uint64) Context { return meta.ContextFromCounter(counter) }
-
 type PutArgs struct {
 	Key     string
-	Value   string
-	Context Context
+	Object  Object
+	BaseContext Context // the context of the original request
 }
 
 type PutReply struct {
@@ -40,11 +32,6 @@ type PutReply struct {
 
 type GetArgs struct {
 	Key string
-}
-
-type Object struct {
-	Value   string
-	Context Context
 }
 
 type GetReply struct {

@@ -8,7 +8,6 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/tester1"
-	"6.5840/vclock"
 )
 
 const Debug = false
@@ -25,8 +24,7 @@ type KVServer struct {
 	coordMu sync.Mutex
 
 	id       string
-	kv       map[string]string
-	contexts map[string]rpc.Context // key -> context
+	kv       map[string][]rpc.Object // key -> list of objects
 
 	// for consistent hashing
 	ring        *chr.ConsistentHashRing
@@ -40,8 +38,7 @@ type KVServer struct {
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	writeQuorum int, readQuorum int, ends map[string]*labrpc.ClientEnd) *KVServer {
 	kv := &KVServer{id: serverID,
-		kv:          make(map[string]string),
-		contexts:    make(map[string]rpc.Context),
+		kv:          make(map[string][]rpc.Object),
 		ring:        ring,
 		writeQuorum: writeQuorum,
 		readQuorum:  readQuorum,
@@ -60,32 +57,35 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 // and includes information such as the version of the object.
 // TODO: sort the final reply by vector clock (a list of (node, counter) pairs)
 // TODO: handle the case where the read quorum is not met
-// TODO: implement context
 func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
+	kv.coordMu.Lock()
+	defer kv.coordMu.Unlock()
+
 	// check if myself is the coordinator
 	if kv.ring.GetCoordinator(args.Key) != kv.id {
 		reply.Err = rpc.ErrNotCoordinator
 		return
 	}
-	type getResult struct {
+
+	// forward the get request to the replicas
+	type forwardResult struct {
 		ok    bool
 		reply rpc.GetReply
 	}
 
-	// Query replicas in the preference list and apply read-quorum semantics.
 	prefList := kv.ring.GetPreferenceList(args.Key)
-	ch := make(chan getResult, len(prefList))
+	ch := make(chan forwardResult, len(prefList))
 
 	for _, serverID := range prefList {
 		go func(serverID string) {
-			repArgs := &rpc.GetArgs{Key: args.Key}
-			repReply := rpc.GetReply{}
-			ok := kv.ends[serverID].Call("KVServer.ReplicaGet", repArgs, &repReply)
-			ch <- getResult{ok: ok, reply: repReply}
+			forwardArgs := rpc.GetArgs{Key: args.Key}
+			forwardReply := rpc.GetReply{}
+			ok := kv.ends[serverID].Call("KVServer.ReplicaGet", &forwardArgs, &forwardReply)
+			ch <- forwardResult{ok: ok, reply: forwardReply}
 		}(serverID)
 	}
 
-	okCount := 0
+	successCount := 0
 	noKeyCount := 0
 	siblings := make([]rpc.Object, 0)
 	for i := 0; i < len(prefList); i++ {
@@ -94,15 +94,16 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 			continue
 		}
 		if res.reply.Err == rpc.OK {
-			okCount++
+			successCount++
 			for _, obj := range res.reply.Objects {
-				siblings = mergeSiblingObject(siblings, obj)
+				siblings, _ = rpc.AddObject(siblings, obj)
 			}
 		} else if res.reply.Err == rpc.ErrNoKey {
 			noKeyCount++
 		}
 	}
-	if okCount >= kv.readQuorum {
+
+	if successCount >= kv.readQuorum {
 		reply.Objects = siblings
 		reply.Err = rpc.OK
 	} else if noKeyCount >= kv.readQuorum {
@@ -128,30 +129,34 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		reply.Err = rpc.ErrNotCoordinator
 		return
 	}
-	type putResult struct {
+
+	// forward the put request to the replicas
+	type forwardResult struct {
 		ok  bool
 		err rpc.Err
 	}
 
 	prefList := kv.ring.GetPreferenceList(args.Key)
-	ch := make(chan putResult, len(prefList))
-
+	ch := make(chan forwardResult, len(prefList))
+	args.Object.Context.Update(kv.id, args.Object.Value)
+	
 	for _, serverID := range prefList {
 		go func(serverID string) {
-			repArgs := &rpc.PutArgs{Key: args.Key, Value: args.Value, Context: args.Context}
-			repReply := rpc.PutReply{}
-			ok := kv.ends[serverID].Call("KVServer.ReplicaPut", repArgs, &repReply)
+			forwardArgs := rpc.PutArgs{Key: args.Key, Object: args.Object, BaseContext: args.BaseContext}
+			forwardReply := rpc.PutReply{}
+			ok := kv.ends[serverID].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
 			if !ok {
-				ch <- putResult{ok: false}
+				ch <- forwardResult{ok: false}
 				return
 			}
-			ch <- putResult{ok: true, err: repReply.Err}
+			ch <- forwardResult{ok: true, err: forwardReply.Err}
 		}(serverID)
 	}
 
+	// check the results from the replicas
 	successCount := 0
 	versionErrCount := 0
-	noKeyErrCount := 0
+	noKeyCount := 0
 	for i := 0; i < len(prefList); i++ {
 		res := <-ch
 		if !res.ok {
@@ -159,20 +164,20 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		}
 		if res.err == rpc.OK {
 			successCount++
+			if successCount >= kv.writeQuorum {
+				reply.Err = rpc.OK
+				return
+			}
 		} else if res.err == rpc.ErrVersion {
 			versionErrCount++
 		} else if res.err == rpc.ErrNoKey {
-			noKeyErrCount++
+			noKeyCount++
 		}
 	}
 
-	// Dynamo semantics: not enough ACKs means client-visible write failure,
-	// while partial replica writes are still possible and intentionally kept.
-	if successCount >= kv.writeQuorum {
-		reply.Err = rpc.OK
-	} else if successCount == 0 && versionErrCount > 0 {
+	if versionErrCount >= kv.writeQuorum {
 		reply.Err = rpc.ErrVersion
-	} else if successCount == 0 && noKeyErrCount > 0 {
+	} else if noKeyCount >= kv.writeQuorum {
 		reply.Err = rpc.ErrNoKey
 	} else {
 		reply.Err = rpc.ErrWriteQuorumNotMet
@@ -182,52 +187,17 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 // Get returns the value and context for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	value, ok := kv.kv[args.Key]
+	siblings, ok := kv.kv[args.Key]
 	if !ok {
 		reply.Err = rpc.ErrNoKey
 		return
 	}
-	reply.Objects = []rpc.Object{{
-		Value:   value,
-		Context: kv.contexts[args.Key],
-	}}
+	reply.Objects = siblings
 	reply.Err = rpc.OK
 	return
-}
-
-func mergeSiblingObject(existing []rpc.Object, candidate rpc.Object) []rpc.Object {
-	keepCandidate := true
-	i := 0
-	for i < len(existing) {
-		cmp := candidate.Context.Compare(existing[i].Context)
-		switch cmp {
-		case vclock.Before:
-			// Candidate is dominated by an existing sibling.
-			keepCandidate = false
-			i = len(existing)
-		case vclock.After:
-			// Candidate dominates this sibling, remove existing[i].
-			existing = append(existing[:i], existing[i+1:]...)
-		case vclock.Equal:
-			// Same causal version, keep the latest by timestamp (LWW tie-breaker).
-			if candidate.Context.Timestamp > existing[i].Context.Timestamp {
-				existing[i] = candidate
-			}
-			keepCandidate = false
-			i = len(existing)
-		default:
-			// Concurrent: keep both.
-			i++
-		}
-	}
-	if keepCandidate {
-		existing = append(existing, candidate)
-	}
-	return existing
 }
 
 // Update the value for a key if args.Context matches the context of
@@ -235,24 +205,23 @@ func mergeSiblingObject(existing []rpc.Object, candidate rpc.Object) []rpc.Objec
 // If the key doesn't exist, Put installs the value if the
 // args.Context is zero, and returns ErrNoKey otherwise.
 func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here.
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	_, ok := kv.kv[args.Key]
-	// if the key doesn't exist and the context counter is not 0, return ErrNoKey
-	if !ok && args.Context.Counter() != 0 {
+	siblings, ok := kv.kv[args.Key]
+	// if the key doesn't exist and the context is not initial, return ErrNoKey
+	if !ok && !args.BaseContext.IsInitial() {
 		reply.Err = rpc.ErrNoKey
 		return
 	}
-	// if the key exists and the version doesn't match, return ErrVersion
-	if ok && args.Context.Counter() != kv.contexts[args.Key].Counter() {
+
+	_, added := rpc.AddObject(siblings, rpc.Object{Value: args.Object.Value, Context: args.BaseContext})
+	if !added {
 		reply.Err = rpc.ErrVersion
 		return
 	}
-	// otherwise, install the value
-	kv.kv[args.Key] = args.Value
-	kv.contexts[args.Key] = args.Context.Next()
+	// otherwise, install the siblings
+	kv.kv[args.Key] = append(siblings, args.Object)
 	reply.Err = rpc.OK
 	return
 }

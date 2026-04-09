@@ -55,7 +55,7 @@ func Get(cfg *tester.Config, ck IKVClerk, key string, log *OpLog, cli int) (stri
 	if log != nil {
 		log.Append(porcupine.Operation{
 			Input:    models.KvInput{Op: 0, Key: key},
-			Output:   models.KvOutput{Value: val, Version: ver.Counter(), Err: string(err)},
+			Output:   models.KvOutput{Value: val, Version: counter(ver), Err: string(err)},
 			Call:     start,
 			Return:   end,
 			ClientId: cli,
@@ -71,7 +71,7 @@ func Put(cfg *tester.Config, ck IKVClerk, key string, value string, context rpc.
 	cfg.OpInc()
 	if log != nil {
 		log.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: context.Counter()},
+			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: counter(context)},
 			Output:   models.KvOutput{Err: string(err)},
 			Call:     start,
 			Return:   end,
@@ -148,7 +148,7 @@ func (ts *Test) Get(ck IKVClerk, key string, cli int) (string, rpc.Context, rpc.
 	if ts.oplog != nil {
 		ts.oplog.Append(porcupine.Operation{
 			Input:    models.KvInput{Op: 0, Key: key},
-			Output:   models.KvOutput{Value: val, Version: ver.Counter(), Err: string(err)},
+			Output:   models.KvOutput{Value: val, Version: counter(ver), Err: string(err)},
 			Call:     start,
 			Return:   end,
 			ClientId: cli,
@@ -164,7 +164,7 @@ func (ts *Test) Put(ck IKVClerk, key string, value string, context rpc.Context, 
 	end := int64(time.Since(t0))
 	if ts.oplog != nil {
 		ts.oplog.Append(porcupine.Operation{
-			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: context.Counter()},
+			Input:    models.KvInput{Op: 1, Key: key, Value: value, Version: counter(context)},
 			Output:   models.KvOutput{Err: string(err)},
 			Call:     start,
 			Return:   end,
