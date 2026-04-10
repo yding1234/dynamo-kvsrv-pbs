@@ -9,6 +9,7 @@ import (
 	"6.5840/labrpc"
 	"6.5840/tester1"
 	"6.5840/kvsrv1/merkle"
+	"time"
 )
 
 const Debug = false
@@ -36,8 +37,10 @@ type KVServer struct {
 	ends map[string]*labrpc.ClientEnd
 
 	// for anti-entropy
-	merkleRoot *merkle.MakeMerkleNode
+	merkleRoot *merkle.MerkleNode
 	sectorsKeys map[int][]string // sector ID -> keys
+	antiEntropyInterval time.Duration
+	stopCh chan struct{}
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
@@ -48,7 +51,18 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		writeQuorum: writeQuorum,
 		readQuorum:  readQuorum,
 		ends:        ends,
+		merkleRoot: nil,
+		sectorsKeys: nil,
+		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
+		stopCh: make(chan struct{}),
 	}
+	sectors := ring.nodes[serverID]
+	kv.sectorsKeys = make(map[int][]string, 0, len(sectors))
+	for _, sector := range sectors {
+		kv.sectorsKeys[sector] = make([]string, 0)
+	}
+	kv.merkleRoot = kv.MakeMerkleTree()
+	kv.StartRefreshMerkleTree(antiEntropyInterval)
 	return kv
 }
 
@@ -234,6 +248,12 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 	// otherwise, install the siblings
 	kv.kv[args.Key] = rpc.AddObject(siblings, args.Object, nil) // nil means no specify sort function
+
+	// if the context is initial, add the key to the sector-keys map
+	if args.BaseContext.IsInitial() {
+		sector := kv.ring.keyToSector(args.Key)
+		kv.sectorsKeys[sector] = append(kv.sectorsKeys[sector], args.Key)
+	}
 	reply.Err = rpc.OK
 	return
 }
