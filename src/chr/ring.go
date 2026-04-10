@@ -172,3 +172,10 @@ func (chr *ConsistentHashRing) GetNumReplicas() int {
 	defer chr.rwMutex.RUnlock()
 	return chr.numReplicas
 }
+
+
+func (chr *ConsistentHashRing) GetNodeID(sectorID int) string {
+	chr.rwMutex.RLock()
+	defer chr.rwMutex.RUnlock()
+	return chr.sectorMap[sectorID]
+}

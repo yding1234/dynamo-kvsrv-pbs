@@ -20,6 +20,7 @@ const (
     ErrWriteQuorumNotMet = "ErrWriteQuorumNotMet"
 )
 
+// for get/put requests between the coordinator and the client
 type PutArgs struct {
 	Key     string
 	Object  Object
@@ -39,6 +40,7 @@ type GetReply struct {
 	Err     Err
 }
 
+// for forwarding requests to the replicas
 type ForwardGetResult struct {
 	ServerID string
 	OK    bool
@@ -50,6 +52,7 @@ type ForwardPutResult struct {
 	Err Err
 }
 
+// for read repair
 type RepairArgs struct {
     Key     string
     Objects []Object // the canonical siblings
@@ -60,6 +63,7 @@ type RepairReply struct {
     Err Err
 }
 
+// for anti-entropy
 type AntiEntropyHashArgs struct {
     PeerID string
     Start  int

@@ -8,6 +8,7 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/tester1"
+	"6.5840/kvsrv1/merkle"
 )
 
 const Debug = false
@@ -33,6 +34,10 @@ type KVServer struct {
 
 	// for forwarding requests to the replicas
 	ends map[string]*labrpc.ClientEnd
+
+	// for anti-entropy
+	merkleRoot *merkle.MakeMerkleNode
+	sectorsKeys map[int][]string // sector ID -> keys
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
