@@ -6,10 +6,15 @@ func findStaleReplicas(canonicalSiblings []rpc.Object, results []rpc.ForwardGetR
 	staleReplicas := make([]string, 0)
 
 	for _, res := range results {
-		if res.Reply.Err == rpc.OK {
-			if !IsSameSiblings(canonicalSiblings, res.Reply.Objects) {
-				staleReplicas = append(staleReplicas, res.ServerID)
-			}
+		if !res.OK {
+			continue
+		}
+		if res.Reply.Err != rpc.OK {
+			staleReplicas = append(staleReplicas, res.ServerID)
+			continue
+		}
+		if !IsSameSiblings(canonicalSiblings, res.Reply.Objects) {
+			staleReplicas = append(staleReplicas, res.ServerID)
 		}
 	}
 	return staleReplicas
@@ -44,6 +49,12 @@ func (kv *KVServer) repairReplicas(key string, canonicalSiblings []rpc.Object, s
 func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
+	if args.Delete {
+		delete(kv.kv, args.Key)
+		reply.Err = rpc.OK
+		return
+	}
 
 	kv.kv[args.Key] = rpc.CopyObjects(args.Objects)
 	reply.Err = rpc.OK

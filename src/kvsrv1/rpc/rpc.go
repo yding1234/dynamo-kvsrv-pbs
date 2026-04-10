@@ -53,6 +53,7 @@ type ForwardPutResult struct {
 type RepairArgs struct {
     Key     string
     Objects []Object // the canonical siblings
+    Delete  bool
 }
 
 type RepairReply struct {
