@@ -1,5 +1,10 @@
 package vclock
 
+import (
+	"sort"
+	"strings"
+)
+
 type VClock map[string]uint64 // node name -> version value
 
 const (
@@ -93,4 +98,30 @@ func (v VClock) Merge(other VClock) {
 	for node := range nodes {
 		v[node] = max(v[node], other[node])
 	}
+}
+
+type vcEntry struct {
+    Node    string
+    Version uint64
+}
+
+func (v VClock) ToVCEntries(sortFunc func(a, b vcEntry) int) []vcEntry {
+	entries := make([]vcEntry, 0, len(v))
+
+	for node, version := range v {
+		entries = append(entries, vcEntry{Node: node, Version: version})
+	}
+	if sortFunc == nil {
+        sortFunc = SortByNodeName
+    }
+
+	sort.Slice(entries, func(i, j int) bool {
+		return sortFunc(entries[i], entries[j]) < 0
+	})
+	return entries
+}
+
+// sort by node name
+func SortByNodeName(a, b vcEntry) int {
+	return strings.Compare(a.Node, b.Node)
 }

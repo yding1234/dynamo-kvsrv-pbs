@@ -94,7 +94,9 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		if results[i].Reply.Err == rpc.OK {
 			successCount++
 			for _, obj := range results[i].Reply.Objects {
-				siblings, _ = rpc.AddObject(siblings, obj)
+				if obj.CanBeAddedTo(siblings) {
+					siblings = rpc.AddObject(siblings, obj, nil) // nil means no specify sort function
+				}
 			}
 		} else if results[i].Reply.Err == rpc.ErrNoKey {
 			noKeyCount++
@@ -219,13 +221,13 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 
 	baseObject := rpc.Object{Value: args.Object.Value, Context: args.BaseContext}
-	_, added := rpc.AddObject(siblings, baseObject)
-	if !added {
+	canAdd := baseObject.CanBeAddedTo(siblings)
+	if !canAdd {
 		reply.Err = rpc.ErrVersion
 		return
 	}
 	// otherwise, install the siblings
-	kv.kv[args.Key] = append(siblings, args.Object)
+	kv.kv[args.Key] = rpc.AddObject(siblings, args.Object, nil) // nil means no specify sort function
 	reply.Err = rpc.OK
 	return
 }

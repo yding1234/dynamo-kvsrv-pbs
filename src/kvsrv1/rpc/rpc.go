@@ -59,3 +59,11 @@ type RepairArgs struct {
 type RepairReply struct {
     Err Err
 }
+
+type AntiEntropyHashArgs struct {
+    PeerID string
+    Start  int
+    End    int
+    Level  int
+}
+
