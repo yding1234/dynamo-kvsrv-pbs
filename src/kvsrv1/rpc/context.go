@@ -37,6 +37,14 @@ func NewContextFromVClock(vc vclock.VClock) Context {
 	}
 }
 
+func (ctx Context) Copy() Context {
+	return Context{
+		VC: ctx.VC.Copy(),
+		Timestamp: ctx.Timestamp,
+		ETag: ctx.ETag,
+	}
+}
+
 func (ctx Context) IsInitial() bool {
 	return ctx.VC.IsInitial() && ctx.ETag == ""
 }

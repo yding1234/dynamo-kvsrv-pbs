@@ -35,3 +35,19 @@ func AddObject(siblings []Object, candidate Object) ([]Object, bool) {
     kept = append(kept, candidate)
     return kept, true
 }
+
+func CopyObjects(siblings []Object) []Object {
+    copied := make([]Object, len(siblings))
+    for i, sibling := range siblings {
+        copied[i] = Object{
+            Value: sibling.Value,
+            Context: sibling.Context.Copy(),
+        }
+    }
+    return copied
+}
+
+func (obj Object) IsEqual(other Object) bool {
+	return obj.Context.IsEqual(other.Context)
+}
+

@@ -68,42 +68,47 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	}
 
 	// forward the get request to the replicas
-	type forwardResult struct {
-		ok    bool
-		reply rpc.GetReply
-	}
 
 	prefList := kv.ring.GetPreferenceList(args.Key)
-	ch := make(chan forwardResult, len(prefList))
+	ch := make(chan rpc.ForwardGetResult, len(prefList))
 
 	for _, serverID := range prefList {
 		go func(serverID string) {
 			forwardArgs := rpc.GetArgs{Key: args.Key}
 			forwardReply := rpc.GetReply{}
 			ok := kv.ends[serverID].Call("KVServer.ReplicaGet", &forwardArgs, &forwardReply)
-			ch <- forwardResult{ok: ok, reply: forwardReply}
+			ch <- rpc.ForwardGetResult{ServerID: serverID, OK: ok, Reply: forwardReply}
 		}(serverID)
 	}
 
 	successCount := 0
 	noKeyCount := 0
 	siblings := make([]rpc.Object, 0)
+	results := make([]rpc.ForwardGetResult, len(prefList))
+
 	for i := 0; i < len(prefList); i++ {
-		res := <-ch
-		if !res.ok {
+		results[i] = <-ch
+		if !results[i].OK {
 			continue
 		}
-		if res.reply.Err == rpc.OK {
+		if results[i].Reply.Err == rpc.OK {
 			successCount++
-			for _, obj := range res.reply.Objects {
+			for _, obj := range results[i].Reply.Objects {
 				siblings, _ = rpc.AddObject(siblings, obj)
 			}
-		} else if res.reply.Err == rpc.ErrNoKey {
+		} else if results[i].Reply.Err == rpc.ErrNoKey {
 			noKeyCount++
 		}
 	}
 
 	if successCount >= kv.readQuorum {
+		// read repair
+		canonicalSiblings := rpc.CopyObjects(siblings)
+		staleReplicas := findStaleReplicas(canonicalSiblings, results)
+		key := args.Key
+		go kv.repairReplicas(key, canonicalSiblings, staleReplicas)
+
+		// return the siblings
 		reply.Objects = siblings
 		reply.Err = rpc.OK
 	} else if noKeyCount >= kv.readQuorum {
@@ -131,13 +136,9 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 
 	// forward the put request to the replicas
-	type forwardResult struct {
-		ok  bool
-		err rpc.Err
-	}
-
 	prefList := kv.ring.GetPreferenceList(args.Key)
-	ch := make(chan forwardResult, len(prefList))
+	ch := make(chan rpc.ForwardPutResult, len(prefList))
+
 	writeObject := args.Object
 	writeObject.Context = args.BaseContext
 	writeObject.Context.Update(kv.id, writeObject.Value)
@@ -148,10 +149,10 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 			forwardReply := rpc.PutReply{}
 			ok := kv.ends[serverID].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
 			if !ok {
-				ch <- forwardResult{ok: false}
+				ch <- rpc.ForwardPutResult{OK: false}
 				return
 			}
-			ch <- forwardResult{ok: true, err: forwardReply.Err}
+			ch <- rpc.ForwardPutResult{OK: true, Err: forwardReply.Err}
 		}(serverID)
 	}
 
@@ -161,18 +162,18 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	noKeyCount := 0
 	for i := 0; i < len(prefList); i++ {
 		res := <-ch
-		if !res.ok {
+		if !res.OK {
 			continue
 		}
-		if res.err == rpc.OK {
+		if res.Err == rpc.OK {
 			successCount++
 			if successCount >= kv.writeQuorum {
 				reply.Err = rpc.OK
 				return
 			}
-		} else if res.err == rpc.ErrVersion {
+		} else if res.Err == rpc.ErrVersion {
 			versionErrCount++
-		} else if res.err == rpc.ErrNoKey {
+		} else if res.Err == rpc.ErrNoKey {
 			noKeyCount++
 		}
 	}

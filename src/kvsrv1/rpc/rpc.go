@@ -38,3 +38,23 @@ type GetReply struct {
 	Objects []Object
 	Err     Err
 }
+
+type ForwardGetResult struct {
+	ServerID string
+	OK    bool
+	Reply GetReply
+}
+
+type ForwardPutResult struct {
+	OK  bool
+	Err Err
+}
+
+type RepairArgs struct {
+    Key     string
+    Objects []Object // the canonical siblings
+}
+
+type RepairReply struct {
+    Err Err
+}

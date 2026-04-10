@@ -1,0 +1,50 @@
+package kvsrv
+
+import "6.5840/kvsrv1/rpc"
+
+func findStaleReplicas(canonicalSiblings []rpc.Object, results []rpc.ForwardGetResult) []string {
+	staleReplicas := make([]string, 0)
+
+	for _, res := range results {
+		if res.Reply.Err == rpc.OK {
+			if !IsSameSiblings(canonicalSiblings, res.Reply.Objects) {
+				staleReplicas = append(staleReplicas, res.ServerID)
+			}
+		}
+	}
+	return staleReplicas
+}
+
+func IsSameSiblings(siblings []rpc.Object, other []rpc.Object) bool {
+	if len(siblings) != len(other) {
+		return false
+	}
+	for _, sibling := range siblings {
+		found := false
+		for _, other := range other {
+			if sibling.IsEqual(other) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func (kv *KVServer) repairReplicas(key string, canonicalSiblings []rpc.Object, staleReplicas []string) {
+	for _, staleReplica := range staleReplicas {
+		go kv.ends[staleReplica].Call("KVServer.RepairPut", 
+			&rpc.RepairArgs{Key: key, Objects: canonicalSiblings}, &rpc.RepairReply{})
+	}
+}
+
+func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	kv.kv[args.Key] = rpc.CopyObjects(args.Objects)
+	reply.Err = rpc.OK
+}
