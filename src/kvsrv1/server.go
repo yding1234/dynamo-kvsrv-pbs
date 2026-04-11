@@ -8,7 +8,6 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
 	"6.5840/tester1"
-	"6.5840/kvsrv1/merkle"
 	"time"
 )
 
@@ -37,8 +36,8 @@ type KVServer struct {
 	ends map[string]*labrpc.ClientEnd
 
 	// for anti-entropy
-	merkleRoot *merkle.MerkleNode
-	sectorsKeys map[int][]string // sector ID -> keys
+	merkleRoot *MerkleNode
+	sectorKeys map[int][]string // sector ID -> keys
 	antiEntropyInterval time.Duration
 	stopCh chan struct{}
 }
@@ -52,17 +51,17 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		readQuorum:  readQuorum,
 		ends:        ends,
 		merkleRoot: nil,
-		sectorsKeys: nil,
+		sectorKeys: nil,
 		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
 		stopCh: make(chan struct{}),
 	}
-	sectors := ring.nodes[serverID]
-	kv.sectorsKeys = make(map[int][]string, 0, len(sectors))
+	sectors := ring.GetSectors(serverID) // sectors owned by this server
+	kv.sectorKeys = make(map[int][]string, len(sectors))
 	for _, sector := range sectors {
-		kv.sectorsKeys[sector] = make([]string, 0)
+		kv.sectorKeys[sector] = make([]string, 0)
 	}
-	kv.merkleRoot = kv.MakeMerkleTree()
-	kv.StartRefreshMerkleTree(antiEntropyInterval)
+	kv.merkleRoot = kv.BuildMerkleTree()
+	kv.StartRefreshMerkleTree(kv.antiEntropyInterval)
 	return kv
 }
 
@@ -251,8 +250,8 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 
 	// if the context is initial, add the key to the sector-keys map
 	if args.BaseContext.IsInitial() {
-		sector := kv.ring.keyToSector(args.Key)
-		kv.sectorsKeys[sector] = append(kv.sectorsKeys[sector], args.Key)
+		sector := kv.ring.KeyToSector(args.Key)
+		kv.sectorKeys[sector] = append(kv.sectorKeys[sector], args.Key)
 	}
 	reply.Err = rpc.OK
 	return
@@ -275,4 +274,23 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 	ring := chr.MakeConsistentHashRing(numReplicas, numSectors, len(ends), nodeIDs)
 	kv := MakeKVServer(tester.ServerName(gid, srv), ring, writeQuorum, readQuorum, endsMap)
 	return []any{kv}
+}
+
+func (kv *KVServer) CopyKVAndSectorKeys() (map[string][]rpc.Object, map[int][]string) {
+    kv.mu.Lock()
+
+    kvCopy := make(map[string][]rpc.Object, len(kv.kv))
+    for k, objs := range kv.kv {
+        kvCopy[k] = rpc.CopyObjects(objs)
+    }
+
+    sectorsCopy := make(map[int][]string, len(kv.sectorKeys))
+    for sectorID, keys := range kv.sectorKeys {
+        copied := make([]string, len(keys))
+        copy(copied, keys)
+        sectorsCopy[sectorID] = copied
+    }
+
+    kv.mu.Unlock()
+	return kvCopy, sectorsCopy
 }

@@ -23,7 +23,7 @@ type ConsistentHashRing struct {
 	sectorMap map[int]string   // sector to servers
 }
 
-func (chr *ConsistentHashRing) keyToSector(key string) int {
+func (chr *ConsistentHashRing) KeyToSector(key string) int {
 	hash := chr.hashFunc(key)
 	// Map [0, 2^32-1] uniformly into [0, numSectors-1].
 	return int((uint64(hash) * uint64(chr.numSectors)) >> 32)
@@ -63,7 +63,7 @@ func (chr *ConsistentHashRing) GetPreferenceList(key string) []string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 
-	position := chr.keyToSector(key)
+	position := chr.KeyToSector(key)
 
 	prefList := make([]string, 0)
 	curNodeID := chr.sectorMap[position]
@@ -93,7 +93,7 @@ func (chr *ConsistentHashRing) GetCoordinator(key string) string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 
-	position := chr.keyToSector(key)
+	position := chr.KeyToSector(key)
 
 	return chr.sectorMap[position]
 }
@@ -178,4 +178,15 @@ func (chr *ConsistentHashRing) GetNodeID(sectorID int) string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 	return chr.sectorMap[sectorID]
+}
+
+func (chr *ConsistentHashRing) GetSectors(nodeID string) []int {
+	chr.rwMutex.RLock()
+	defer chr.rwMutex.RUnlock()
+	// copy the sectors, avoid returning the internal pointer
+	sectors := make([]int, 0, len(chr.nodes[nodeID]))
+	for _, sector := range chr.nodes[nodeID] {
+		sectors = append(sectors, sector)
+	}
+	return sectors
 }

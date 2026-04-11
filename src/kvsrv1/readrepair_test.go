@@ -116,7 +116,7 @@ func collectCanonicalReplicaSiblings(t *testing.T, tck *kvtest.TestClerk, key st
 			t.Fatalf("replica %s get failed: err=%v", server, got.Err)
 		}
 		for _, obj := range got.Objects {
-			canonicalObjects, _ = rpc.AddObject(canonicalObjects, obj)
+			canonicalObjects = rpc.AddObject(canonicalObjects, obj, nil)
 		}
 	}
 	return canonicalObjects

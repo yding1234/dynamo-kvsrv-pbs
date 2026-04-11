@@ -28,7 +28,7 @@ func (obj Object) CanBeAddedTo(siblings []Object) bool {
 
 // add the candidate object into the siblings list.
 // precondition: candidate.CanBeAddedTo(siblings) = true, and siblings is sorted by sort
-func AddObject(siblings []Object, candidate Object, sort func(i, j Object) bool) Object {
+func AddObject(siblings []Object, candidate Object, sort func(i, j Object) bool) []Object {
     if sort == nil {
         sort = SortByTimestamp
     }
