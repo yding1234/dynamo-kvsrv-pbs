@@ -64,10 +64,38 @@ type RepairReply struct {
 }
 
 // for anti-entropy
-type AntiEntropyHashArgs struct {
-    PeerID string
-    Start  int
-    End    int
-    Level  int
+type RepairGetDiffArgs struct {
+	SectorID int // the sector ID to be reconciled with
+	Hash [32]byte // the hash of the root of the merkle tree of this sector
 }
 
+
+// TODO: TO BE CHECKED
+type RepairGetDiffReply struct {
+	Diff map[string][]Object // the difference between the two merkle trees
+	Err Err
+}
+
+type AntiEntropyHashArgs struct {
+    SectorID int
+    Level    int
+}
+
+type AntiEntropyHashReply struct {
+    Err  Err
+    Hash [32]byte
+}
+
+// 如果某个 range hash 不同，就请求它的左右子区间 hash。
+type AntiEntropyChildrenReply struct {
+    Err       Err
+    LeftHash  [32]byte
+    RightHash [32]byte
+    Mid       int
+}
+
+// 到叶子后，直接拿这个 leaf 里的 key 和对象集。
+type AntiEntropyLeafReply struct {
+    Err   Err
+    Items map[string][]Object
+}

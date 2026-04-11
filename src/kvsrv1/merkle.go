@@ -49,7 +49,7 @@ func writeKVPair(h hash.Hash,key string, objs []rpc.Object) {
     writeString(h, key)
 	writeUint64(h, uint64(len(objs)))
 
-	if !rpc.IsOrdered(objs, nil) {
+	if !rpc.IsOrdered(objs, nil) { // TODO: change to use rpc.Object.IsOrdered
 		objs = rpc.SortObjects(objs, nil)
 	}
     for _, obj := range objs {
@@ -117,7 +117,7 @@ func (node *MerkleNode) IsInternal() bool {
     return node.Left != nil && node.Right != nil
 }
 
-func getNodeDigest(level int, sectors []int, left, right *MerkleNode, kvData map[string][]rpc.Object, sectorKeys map[int][]string) [32]byte {
+func GetNodeDigest(level int, sectors []int, left, right *MerkleNode, kvData map[string][]rpc.Object, sectorKeys map[int][]string) [32]byte {
 	sectorsCopy := copySectors(sectors)
 
 	h := sha256.New()
@@ -229,3 +229,11 @@ func (kv *KVServer) refreshMerkleTree() {
 }
 
 
+func (node *MerkleNode) GetDigest() [32]byte {
+	return GetNodeDigest(node.Level, node.Sectors, node.Left, node.Right, node.kvData, node.sectorKeys)
+}
+
+func (kv *KVServer) BuildMerkleNodeForSector(sector int) *MerkleNode {
+	keys := kv.sectorKeys[sector]
+	return MakeMerkleLeaf(sector, kv.CopyKV(), keys)
+}

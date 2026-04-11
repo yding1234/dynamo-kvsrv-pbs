@@ -36,7 +36,7 @@ type KVServer struct {
 	ends map[string]*labrpc.ClientEnd
 
 	// for anti-entropy
-	merkleRoot *MerkleNode
+	merkleRoots map[int]*MerkleNode // sector ID -> merkle root, build only on demand
 	sectorKeys map[int][]string // sector ID -> keys
 	antiEntropyInterval time.Duration
 	stopCh chan struct{}
@@ -50,7 +50,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		writeQuorum: writeQuorum,
 		readQuorum:  readQuorum,
 		ends:        ends,
-		merkleRoot: nil,
+		merkleRoots: make(map[int]*MerkleNode),
 		sectorKeys: nil,
 		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
 		stopCh: make(chan struct{}),
@@ -60,8 +60,6 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	for _, sector := range sectors {
 		kv.sectorKeys[sector] = make([]string, 0)
 	}
-	kv.merkleRoot = kv.BuildMerkleTree()
-	kv.StartRefreshMerkleTree(kv.antiEntropyInterval)
 	return kv
 }
 
@@ -290,12 +288,32 @@ func (kv *KVServer) CopyKV() map[string][]rpc.Object {
 
 func (kv *KVServer) CopySectorKeys() map[int][]string {
     kv.mu.Lock()
+	defer kv.mu.Unlock()
 
     sectorKeysCopy := make(map[int][]string, len(kv.sectorKeys))
     for sectorID, keys := range kv.sectorKeys {
         sectorKeysCopy[sectorID] = make([]string, len(keys))
         copy(sectorKeysCopy[sectorID], keys)
     }
-    kv.mu.Unlock()
+    
 	return sectorKeysCopy
+}
+
+func (kv *KVServer) GetSectors() []int {
+	return kv.ring.GetSectors(kv.id)
+}
+
+func (kv *KVServer) CopyPreferenceList(key string) []string {
+	kv.coordMu.Lock()
+	defer kv.coordMu.Unlock()
+	prefList := kv.ring.GetPreferenceList(key)
+	prefListCopy := make([]string, len(prefList))
+	copy(prefListCopy, prefList)
+	return prefListCopy
+}
+
+func (kv *KVServer) GetClientEnd(serverID string) *labrpc.ClientEnd {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	return kv.ends[serverID]
 }

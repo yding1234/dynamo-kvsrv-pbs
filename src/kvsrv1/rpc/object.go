@@ -16,9 +16,10 @@ func NewObject(value string, context Context) Object {
 	}
 }
 
-func (obj Object) CanBeAddedTo(siblings []Object) bool {
-    for _, sibling := range siblings {
-        cmp := obj.Context.Compare(sibling.Context)
+// check if the object can be added to the others by causal order
+func (obj Object) CanBeAddedTo(others []Object) bool {
+    for _, other := range others {
+        cmp := obj.Context.Compare(other.Context)
         if cmp == vclock.Before || cmp == vclock.Equal {
             return false
         }
@@ -50,6 +51,18 @@ func AddObject(siblings []Object, candidate Object, sort func(i, j Object) bool)
     }
     return kept
 }
+
+// merge the siblings and otherSiblings into a new sorted list
+// precondition: objects and otherObjects are already sorted by causal order
+func MergeObjects(objects []Object, otherObjects []Object) []Object {
+    merged := make([]Object, 0, len(objects)+len(otherObjects))
+    for _, obj := range objects {
+        merged, _ = AddObject(merged, obj, nil) // nil means no specify sort function
+    }
+    for _, obj := range otherObjects {
+        merged, _ = AddObject(merged, obj, nil)
+    }
+    return merged
 
 // precondition: i.Context.Compare(j.Context) = vclock.Concurrent or vclock.After
 func SortByTimestamp(i, j Object) bool {

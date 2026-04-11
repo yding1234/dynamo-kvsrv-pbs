@@ -64,29 +64,37 @@ func (chr *ConsistentHashRing) GetPreferenceList(key string) []string {
 	defer chr.rwMutex.RUnlock()
 
 	position := chr.KeyToSector(key)
+	prefList, _ := chr.GetNeighbors(position)
+	return prefList
+}
 
-	prefList := make([]string, 0)
-	curNodeID := chr.sectorMap[position]
-
+// get the neighbors(nodeID + sectorID) of the sector in the ring, including the sector itself
+func (chr *ConsistentHashRing) GetNeighbors(sectorID int) []string {
 	target := chr.numReplicas + chr.numBackups
 	if target > chr.numServers {
 		target = chr.numServers
 	}
-	for len(prefList) < target {
+	neighborNodes := make([]string, target)
+	neighborSectors := make([]int, target)
+	curNodeID := chr.sectorMap[sectorID]
+
+	for len(neighborNodes) < target {
 		repeatedNode := false
-		for i := 0; i < len(prefList); i++ {
-			if prefList[i] == curNodeID {
+		for i := 0; i < len(neighborNodes); i++ {
+			if neighborNodes[i] == curNodeID {
 				repeatedNode = true
 				break
 			}
 		}
 		if !repeatedNode {
-			prefList = append(prefList, curNodeID)
+			neighborNodes = append(neighborNodes, curNodeID)
+			neighborSectors = append(neighborSectors, sectorID)
 		}
-		position = (position + 1) % chr.numSectors
-		curNodeID = chr.sectorMap[position]
+		// move to the next sector
+		sectorID = (sectorID + 1) % chr.numSectors
+		curNodeID = chr.sectorMap[sectorID]
 	}
-	return prefList
+	return neighborNodes, neighborSectors
 }
 
 func (chr *ConsistentHashRing) GetCoordinator(key string) string {
