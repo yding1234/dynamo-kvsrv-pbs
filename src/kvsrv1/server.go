@@ -276,7 +276,7 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 	return []any{kv}
 }
 
-func (kv *KVServer) CopyKVAndSectorKeys() (map[string][]rpc.Object, map[int][]string) {
+func (kv *KVServer) CopyKV() map[string][]rpc.Object {
     kv.mu.Lock()
 
     kvCopy := make(map[string][]rpc.Object, len(kv.kv))
@@ -284,13 +284,18 @@ func (kv *KVServer) CopyKVAndSectorKeys() (map[string][]rpc.Object, map[int][]st
         kvCopy[k] = rpc.CopyObjects(objs)
     }
 
-    sectorsCopy := make(map[int][]string, len(kv.sectorKeys))
-    for sectorID, keys := range kv.sectorKeys {
-        copied := make([]string, len(keys))
-        copy(copied, keys)
-        sectorsCopy[sectorID] = copied
-    }
-
     kv.mu.Unlock()
-	return kvCopy, sectorsCopy
+	return kvCopy
+}
+
+func (kv *KVServer) CopySectorKeys() map[int][]string {
+    kv.mu.Lock()
+
+    sectorKeysCopy := make(map[int][]string, len(kv.sectorKeys))
+    for sectorID, keys := range kv.sectorKeys {
+        sectorKeysCopy[sectorID] = make([]string, len(keys))
+        copy(sectorKeysCopy[sectorID], keys)
+    }
+    kv.mu.Unlock()
+	return sectorKeysCopy
 }

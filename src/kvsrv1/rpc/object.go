@@ -88,7 +88,7 @@ func IsOrdered(siblings []Object, sort func(i, j Object) bool) bool {
     return true
 }
 
-func sortObjects(siblings []Object, sort func(i, j Object) bool) []Object {
+func SortObjects(siblings []Object, sort func(i, j Object) bool) []Object {
     if sort == nil {
         sort = SortByTimestamp
     }
