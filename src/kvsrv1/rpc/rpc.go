@@ -18,6 +18,9 @@ const (
 	ErrNotCoordinator = "ErrNotCoordinator"
 	ErrReadQuorumNotMet  = "ErrReadQuorumNotMet"
     ErrWriteQuorumNotMet = "ErrWriteQuorumNotMet"
+
+	// For anti-entropy
+	ErrNoHashValue = "ErrNoHashValue"
 )
 
 // for get/put requests between the coordinator and the client
@@ -63,16 +66,23 @@ type RepairReply struct {
     Err Err
 }
 
+type TreeSummary struct {
+    SectorID int // the sector ID of the tree
+    // Node index 0 is the root, 1-2 is the second layer, 3-6 is the third layer...
+	// TODO: use the BFS order to store the nodes
+    Nodes    [][32]byte
+}
+
 // for anti-entropy
 type RepairGetDiffArgs struct {
 	SectorID int // the sector ID to be reconciled with
-	Hash [32]byte // the hash of the root of the merkle tree of this sector
+	TreeSummary TreeSummary
 }
 
 
 // TODO: TO BE CHECKED
 type RepairGetDiffReply struct {
-	Diff map[string][]Object // the difference between the two merkle trees
+	Diff map[int][]TreeSummary // the difference between the two merkle trees
 	Err Err
 }
 
@@ -91,7 +101,7 @@ type AntiEntropyChildrenReply struct {
     Err       Err
     LeftHash  [32]byte
     RightHash [32]byte
-    Mid       int
+    MidKey string // the key of the middle child
 }
 
 // 到叶子后，直接拿这个 leaf 里的 key 和对象集。

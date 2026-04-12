@@ -26,7 +26,7 @@ type ConsistentHashRing struct {
 func (chr *ConsistentHashRing) KeyToSector(key string) int {
 	hash := chr.hashFunc(key)
 	// Map [0, 2^32-1] uniformly into [0, numSectors-1].
-	return int((uint64(hash) * uint64(chr.numSectors)) >> 32)
+	return int((uint64(hash) * uint64(chr.numSectors)) >> 32) // TODO: figure out why
 }
 
 // Hash function for consistent hashing
@@ -69,7 +69,7 @@ func (chr *ConsistentHashRing) GetPreferenceList(key string) []string {
 }
 
 // get the neighbors(nodeID + sectorID) of the sector in the ring, including the sector itself
-func (chr *ConsistentHashRing) GetNeighbors(sectorID int) []string {
+func (chr *ConsistentHashRing) GetNeighbors(sectorID int) ([]string, []int) {
 	target := chr.numReplicas + chr.numBackups
 	if target > chr.numServers {
 		target = chr.numServers
@@ -198,3 +198,15 @@ func (chr *ConsistentHashRing) GetSectors(nodeID string) []int {
 	}
 	return sectors
 }
+
+// // get responsible sector for a key
+// func (chr *ConsistentHashRing) GetResponsibleSector(key string, nodeID string) int {
+// 	firstSector := chr.KeyToSector(key)
+// 	neighborsNodes, neighborsSectors := chr.GetNeighbors(firstSector)
+// 	for i := 0; i < len(neighborsSectors); i++ {
+// 		if neighborsNodes[i] == nodeID {
+// 			return neighborsSectors[i]
+// 		}
+// 	}
+// 	return -1 // not found, should not happen
+// }

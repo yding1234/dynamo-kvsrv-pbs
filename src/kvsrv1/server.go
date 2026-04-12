@@ -36,7 +36,7 @@ type KVServer struct {
 	ends map[string]*labrpc.ClientEnd
 
 	// for anti-entropy
-	merkleRoots map[int]*MerkleNode // sector ID -> merkle root, build only on demand
+	merkleRoots map[int]*MerkleNode // sector ID -> merkle root
 	sectorKeys map[int][]string // sector ID -> keys
 	antiEntropyInterval time.Duration
 	stopCh chan struct{}
@@ -50,15 +50,10 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		writeQuorum: writeQuorum,
 		readQuorum:  readQuorum,
 		ends:        ends,
-		merkleRoots: make(map[int]*MerkleNode),
-		sectorKeys: nil,
+		merkleRoots: make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
+		sectorKeys: make(map[int][]string, len(ring.GetSectors(serverID))),
 		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
 		stopCh: make(chan struct{}),
-	}
-	sectors := ring.GetSectors(serverID) // sectors owned by this server
-	kv.sectorKeys = make(map[int][]string, len(sectors))
-	for _, sector := range sectors {
-		kv.sectorKeys[sector] = make([]string, 0)
 	}
 	return kv
 }
@@ -248,7 +243,7 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 
 	// if the context is initial, add the key to the sector-keys map
 	if args.BaseContext.IsInitial() {
-		sector := kv.ring.KeyToSector(args.Key)
+		sector := kv.ring.GetCoordinator(args.Key)
 		kv.sectorKeys[sector] = append(kv.sectorKeys[sector], args.Key)
 	}
 	reply.Err = rpc.OK
@@ -299,7 +294,17 @@ func (kv *KVServer) CopySectorKeys() map[int][]string {
 	return sectorKeysCopy
 }
 
+// get sectors from sector-keys map
 func (kv *KVServer) GetSectors() []int {
+	sectors := make([]int, 0, len(kv.sectorKeys))
+	for sector := range kv.sectorKeys {
+		sectors = append(sectors, sector)
+	}
+	return sectors
+}
+
+// get the sectors which are responsible for this server
+func (kv *KVServer) GetResponsibleSectors() []int {
 	return kv.ring.GetSectors(kv.id)
 }
 
@@ -316,4 +321,20 @@ func (kv *KVServer) GetClientEnd(serverID string) *labrpc.ClientEnd {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	return kv.ends[serverID]
+}
+
+func (kv *KVServer) GetKeysFromSector(sector int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	keys := make([]string, len(sectorKeys[sector]))
+	copy(keys, sectorKeys[sector])
+	return keys
+}
+
+func (kv *KVServer) GetSiblings(key string) []rpc.Object {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	siblings := rpc.CopyObjects(kv.kv[key])
+	return siblings
 }
