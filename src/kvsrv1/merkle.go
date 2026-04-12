@@ -66,24 +66,23 @@ func finalizeHash(h hash.Hash) [32]byte {
 
 type MerkleNode struct {
     Level    int
-	Sectors  []int // sectors owned by this node
+
+	Sector   int
+	// only for leaf nodes, otherwise -1
+	Bucket   int
+
 	Parent   *MerkleNode
     Left     *MerkleNode
     Right    *MerkleNode
 	Hash     [32]byte
 }
 
-// func copySectors(sectors []int) []int {
-// 	sectorsCopy := make([]int, len(sectors))
-// 	copy(sectorsCopy, sectors)
-// 	return sectorsCopy
-// }
-
 // TODO: fix after GetNodeDigest
-func (kv *KVServer) MakeMerkleNode(level, sectors []int, left, right *MerkleNode) *MerkleNode {
+func (kv *KVServer) MakeMerkleNode(level, sector, bucket int, left, right *MerkleNode) *MerkleNode {
 	node := &MerkleNode{
         Level: level,
-		Sectors: sectors,
+		Sector: sector,
+		Bucket: bucket,
 		Parent: nil,
         Left: left,
         Right: right,
@@ -99,25 +98,29 @@ func (kv *KVServer) MakeMerkleNode(level, sectors []int, left, right *MerkleNode
 	return node
 }
 
+func (kv *KVServer) MakeMerkleLeaf(sector, bucket int) *MerkleNode {
+	return kv.MakeMerkleNode(0, sector, bucket, nil, nil)
+}
+
+func (kv *KVServer) MakeMerkleInternalNode(left, right *MerkleNode) *MerkleNode {
+	return kv.MakeMerkleNode(left.Level + 1, left.Sector, -1, left, right)
+}
+
 // TODO: get digest from the whole sector first, devided into smaller parts later
 func (node *MerkleNode) GetNodeDigest(kv *KVServer) [32]byte {
 	h := sha256.New()
 
 	// writeUint64(h, uint64(level))
-	// if it is a leaf node, write the kv pairs for all the sectors owned by this node
+	// if it is a leaf node, write the kv pairs for all the keys in the bucket
 	if node.IsLeaf() {
-		for _, sector := range node.Sectors {
-			keys := kv.GetKeysFromSector(sector)
-			if !slices.IsSorted(keys) {
-				keysCopy := make([]string, len(keys))
-				copy(keysCopy, keys)
-				sort.Strings(keysCopy)
-				keys = keysCopy
-			}
-			writeUint64(h, uint64(len(keys)))
-			for _, key := range keys {
-				writeKVPair(h, key, kv.GetSiblings(key))
-			}
+		keys := kv.GetKeysFromBucket(node.Sector, node.Bucket)
+		// sort the keys if not sorted
+		if !slices.IsSorted(keys) {
+			slices.Sort(keys)
+		}
+		writeUint64(h, uint64(len(keys)))
+		for _, key := range keys {
+			writeKVPair(h, key, kv.GetSiblings(key))
 		}
 		writeString(h, "empty")
 		writeString(h, "empty")
@@ -138,11 +141,6 @@ func (node *MerkleNode) GetNodeDigest(kv *KVServer) [32]byte {
 	return finalizeHash(h)
 }
 
-// TODO: fix this after divide the sectors into smaller parts
-func (kv *KVServer) MakeMerkleLeaf(sector int) *MerkleNode {
-	return kv.MakeMerkleNode(0, []int{sector}, nil, nil)
-}
-
 func (node *MerkleNode) IsLeaf() bool {
     return node.Left == nil && node.Right == nil
 }
@@ -157,18 +155,13 @@ func (node *MerkleNode) IsInternal() bool {
 
 // TODO: fix this after divide the sectors into smaller parts
 func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
-	// take a copy of the kv data and sector keys
-	kvData := kv.CopyKV()
-	sectorKeys := kv.CopySectorKeys()
-
-	sectors := []int{sector}
+	buckets := kv.GetBucketsFromSector(sector)
 
 	// build the leaves of the merkle tree
-	leaves := make([]*MerkleNode, 0, len(sectors))
+	leaves := make([]*MerkleNode, 0, len(buckets))
 
-	for _, sector := range sectors {
-		keys := sectorKeys[sector]
-		leaves = append(leaves, kv.MakeMerkleLeaf(sector))
+	for _, bucket := range buckets {
+		leaves = append(leaves, kv.MakeMerkleLeaf(sector, bucket))
 	}
 
 	// build the internal nodes and root of the merkle tree
@@ -179,13 +172,10 @@ func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
 		for ; i + 1 < len(leaves); i += 2 {
 			left := leaves[i]
 			right := leaves[i+1]
-			sectors := make([]int, 0, len(left.Sectors) + len(right.Sectors))
-			sectors = append(sectors, left.Sectors...)
-			sectors = append(sectors, right.Sectors...)
-			upperNodes = append(upperNodes, kv.MakeMerkleNode(level, sectors, left, right))
+			upperNodes = append(upperNodes, kv.MakeMerkleInternalNode(left, right))
 		}
 		if i + 1 == len(leaves) {
-			upperNodes = append(upperNodes, kv.MakeMerkleNode(level, leaves[i].Sectors, leaves[i], nil))
+			upperNodes = append(upperNodes, kv.MakeMerkleInternalNode(leaves[i], nil))
 		}
 		leaves = upperNodes
 		upperNodes = make([]*MerkleNode, 0, len(leaves)/2 + 1)
@@ -196,7 +186,7 @@ func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
 }
 
 func (kv *KVServer) BuildAllMerkleTrees() {
-	for sector := range kv.sectorKeys {
+	for sector, _ := range kv.keysInBuckets {
 		kv.merkleRoots[sector] = kv.BuildMerkleTree(sector)
 	}
 }
@@ -232,7 +222,37 @@ func (kv *KVServer) GetMerkleRoot(sector int) *MerkleNode {
 	return kv.merkleRoots[sector]
 }
 
-// func (node *MerkleNode) GetNodeDigest() [32]byte {
-// 	return node.Hash
-// }
+func (root *MerkleNode) ToSummary() rpc.TreeSummary {
+	hashes := make([][32]byte, 0)
 
+	// access the nodes in BFS order
+	queue := []*MerkleNode{root}
+	visited := make(map[*MerkleNode]bool)
+
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		hashes = append(hashes, node.Hash)
+		visited[node] = true
+		if node.IsInternal() && !visited[node.Left] {
+			queue = append(queue, node.Left)
+		}
+		if node.IsInternal() && !visited[node.Right] {
+			queue = append(queue, node.Right)
+		}
+	}
+	
+	return rpc.TreeSummary{
+		Sector: root.Sector,
+		Hashes: hashes,
+	}
+}
+
+func IsEmptyHash(hash [32]byte) bool {
+	h := sha256.New()
+	writeUint64(h, 0)
+	writeString(h, "empty")
+	writeString(h, "empty")
+	emptyHash := finalizeHash(h)
+	return hash == emptyHash
+}

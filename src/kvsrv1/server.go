@@ -36,8 +36,9 @@ type KVServer struct {
 	ends map[string]*labrpc.ClientEnd
 
 	// for anti-entropy
+	// merkleRoots map[int]rpc.TreeSummary // sector ID -> merkle tree summary
 	merkleRoots map[int]*MerkleNode // sector ID -> merkle root
-	sectorKeys map[int][]string // sector ID -> keys
+	keysInBuckets [][][]string // sector ID -> bucket ID -> keys
 	antiEntropyInterval time.Duration
 	stopCh chan struct{}
 }
@@ -51,10 +52,18 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		readQuorum:  readQuorum,
 		ends:        ends,
 		merkleRoots: make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
-		sectorKeys: make(map[int][]string, len(ring.GetSectors(serverID))),
+		keysInBuckets: make([][][]string, len(ring.numSectors)),
 		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
 		stopCh: make(chan struct{}),
 	}
+
+	for i := 0; i < ring.NumSectors(); i++ {
+		kv.keysInBuckets[i] = make([][]string, ring.BucketsPerSector())
+		for j := 0; j < ring.BucketsPerSector(); j++ {
+			kv.keysInBuckets[i][j] = make([]string, 0)
+		}
+	}
+
 	return kv
 }
 
@@ -295,12 +304,16 @@ func (kv *KVServer) CopySectorKeys() map[int][]string {
 }
 
 // get sectors from sector-keys map
-func (kv *KVServer) GetSectors() []int {
-	sectors := make([]int, 0, len(kv.sectorKeys))
-	for sector := range kv.sectorKeys {
-		sectors = append(sectors, sector)
+func (kv *KVServer) CopyKeysInSector(sector int) [][]string {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	keysInSector := make([][]string, len(kv.keysInBuckets[sector]))
+	for i := 0; i < len(kv.keysInBuckets[sector]); i++ {
+		keysInSector[i] = make([]string, len(kv.keysInBuckets[sector][i]))
+		copy(keysInSector[i], kv.keysInBuckets[sector][i])
 	}
-	return sectors
+	return keysInSector
 }
 
 // get the sectors which are responsible for this server
@@ -335,6 +348,29 @@ func (kv *KVServer) GetKeysFromSector(sector int) {
 func (kv *KVServer) GetSiblings(key string) []rpc.Object {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
 	siblings := rpc.CopyObjects(kv.kv[key])
 	return siblings
+}
+
+func (kv *KVServer) GetKeysFromBucket(sector int, bucket int) []string {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	keys := make([]string, len(kv.keysInBuckets[sector][bucket]))
+	copy(keys, kv.keysInBuckets[sector][bucket])
+	return keys
+}
+
+func (kv *KVServer) GetBucketsFromSector(sector int) [][]string {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	buckets := make([]int, 0, len(kv.keysInBuckets[sector]))
+	for i := 0; i < len(kv.keysInBuckets[sector]); i++ {
+		if len(kv.keysInBuckets[sector][i]) > 0 {
+			buckets = append(buckets, i)
+		}
+	}
+	return buckets
 }

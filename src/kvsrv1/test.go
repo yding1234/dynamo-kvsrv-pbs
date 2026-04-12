@@ -20,7 +20,7 @@ type TestKV struct {
 
 var (
 	numServers = 10
-	numSectors = 100
+	numSectors = 512
 	numReplicas = 3
 	readQuorum = 2
 	writeQuorum = 2

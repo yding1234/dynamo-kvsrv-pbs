@@ -59,7 +59,7 @@ type ForwardPutResult struct {
 type RepairArgs struct {
     Key     string
     Objects []Object // the canonical siblings
-    Delete  bool
+    Delete  bool // if true, delete the key from the current sector
 }
 
 type RepairReply struct {
@@ -67,22 +67,25 @@ type RepairReply struct {
 }
 
 type TreeSummary struct {
-    SectorID int // the sector ID of the tree
-    // Node index 0 is the root, 1-2 is the second layer, 3-6 is the third layer...
-	// TODO: use the BFS order to store the nodes
-    Nodes    [][32]byte
+	Sector int // the sector ID of the tree
+    Hashes    [][32]byte // the hashes of the nodes in the tree
 }
 
 // for anti-entropy
 type RepairGetDiffArgs struct {
-	SectorID int // the sector ID to be reconciled with
-	TreeSummary TreeSummary
+	Sector int // the sector ID to be reconciled with
+	Summary TreeSummary
 }
 
 
+type KeyInfo struct {
+    Key    string
+    Objects []Object
+}
+
 // TODO: TO BE CHECKED
 type RepairGetDiffReply struct {
-	Diff map[int][]TreeSummary // the difference between the two merkle trees
+	DiffKeyInfos []KeyInfo
 	Err Err
 }
 

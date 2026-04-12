@@ -3,6 +3,7 @@ package chr
 import (
 	"fmt"
 	"hash/crc32"
+	"math/bits"
 	"sync"
 )
 
@@ -17,16 +18,36 @@ type ConsistentHashRing struct {
 	numSectors  int // Q in the paper
 	numServers  int // S in the paper
 
+	bucketsPerSector int // used for building merkle tree
+
 	hashFunc  func(string) uint32
 	nodeIDs   []string
 	nodes     map[string][]int // keep track of current nodes and their sectors
 	sectorMap map[int]string   // sector to servers
 }
 
-func (chr *ConsistentHashRing) KeyToSector(key string) int {
+// func (chr *ConsistentHashRing) KeyToSector(key string) int {
+// 	hash := chr.hashFunc(key)
+// 	// Map [0, 2^32-1] uniformly into [0, numSectors-1].
+// 	// sector = sumSectors * hash / 2^32 = hash / 2^(32-9) = hash >> (32-9)
+// 	SectorBits := bits.Len32(uint32(chr.numSectors)) - 1 // log2(numSectors)
+// 	return int((uint64(hash)) >> (32-SectorBits))
+// }
+
+// func (chr *ConsistentHashRing) GetBucket(key string, sectorID int) int {
+// 	hash := chr.hashFunc(key)
+// 	SectorBits := bits.Len32(uint32(chr.numSectors)) - 1 
+// 	BucketBits := bits.Len32(uint32(chr.bucketsPerSector)) - 1
+// 	return int(((hash << SectorBits)>> (32-BucketBits)))
+// }
+
+func (chr *ConsistentHashRing) GetLocation(key string) (int, int) {
 	hash := chr.hashFunc(key)
-	// Map [0, 2^32-1] uniformly into [0, numSectors-1].
-	return int((uint64(hash) * uint64(chr.numSectors)) >> 32) // TODO: figure out why
+	totalBuckets := chr.numSectors * chr.bucketsPerSector
+	position := int((uint64(totalBuckets) * uint64(hash)) >> 32)
+	sectorID := position / chr.bucketsPerSector
+	bucketID := position % chr.bucketsPerSector
+	return sectorID, bucketID
 }
 
 // Hash function for consistent hashing
@@ -39,6 +60,7 @@ func MakeConsistentHashRing(numReplicas int, numSectors int, numServers int, nod
 		numBackups: 0, // TODO: figure out the best value later
 		numSectors: numSectors,
 		numServers: numServers,
+		bucketsPerSector: 256,
 		hashFunc:   Hash,
 		nodeIDs:    nodeIDs,
 		nodes:      make(map[string][]int, 0),
@@ -63,8 +85,8 @@ func (chr *ConsistentHashRing) GetPreferenceList(key string) []string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 
-	position := chr.KeyToSector(key)
-	prefList, _ := chr.GetNeighbors(position)
+	sectorID, _ := chr.GetLocation(key)
+	prefList, _ := chr.GetNeighbors(sectorID)
 	return prefList
 }
 
@@ -101,9 +123,9 @@ func (chr *ConsistentHashRing) GetCoordinator(key string) string {
 	chr.rwMutex.RLock()
 	defer chr.rwMutex.RUnlock()
 
-	position := chr.KeyToSector(key)
+	sectorID, _ := chr.GetLocation(key)
 
-	return chr.sectorMap[position]
+	return chr.sectorMap[sectorID]
 }
 
 // add a node to the consistent hash ring
@@ -142,6 +164,7 @@ func (chr *ConsistentHashRing) GetRichestNode() string {
 	return richestNodeID
 }
 
+// take the first sector from a node
 func (chr *ConsistentHashRing) TakeSectorFrom(nodeID string) int {
 	// take the first sector from the node
 	sectorIndex := chr.nodes[nodeID][0]
@@ -175,9 +198,7 @@ func deleteFromSlice(slice []string, id string) []string {
 	return slice
 }
 
-func (chr *ConsistentHashRing) GetNumReplicas() int {
-	chr.rwMutex.RLock()
-	defer chr.rwMutex.RUnlock()
+func (chr *ConsistentHashRing) NumReplicas() int {
 	return chr.numReplicas
 }
 
@@ -210,3 +231,19 @@ func (chr *ConsistentHashRing) GetSectors(nodeID string) []int {
 // 	}
 // 	return -1 // not found, should not happen
 // }
+
+func (chr *ConsistentHashRing) NumBackups() int {
+	return chr.numBackups
+}
+
+func (chr *ConsistentHashRing) NumSectors() int {
+	return chr.numSectors
+}
+
+func (chr *ConsistentHashRing) NumServers() int {
+	return chr.numServers
+}
+
+func (chr *ConsistentHashRing) BucketsPerSector() int {
+	return chr.bucketsPerSector
+}
