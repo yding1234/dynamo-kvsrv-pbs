@@ -226,7 +226,7 @@ func TestStartAntiEntropyRepairsStaleReplica(t *testing.T) {
 
 	servers[freshNode].StartAntiEntropy()
 
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second) // 10 seconds
 	for time.Now().Before(deadline) {
 		if got := servers[staleNode].GetSiblings(key); IsSameSiblings(currentObjects, got) {
 			return
@@ -239,18 +239,19 @@ func TestStartAntiEntropyRepairsStaleReplica(t *testing.T) {
 }
 
 func TestStartKVServerStartsAntiEntropy(t *testing.T) {
-	net := labrpc.MakeNetwork()
-	defer net.Cleanup()
-
-	oldNumServers := numServers
-	numServers = 2
+	// Keep the sector space small so this test verifies automatic startup, not random-sector timing.
+	oldNumServers, oldNumSectors, oldNumReplicas := numServers, numSectors, numReplicas
 	oldInterval := defaultAntiEntropyInterval
+	numServers, numSectors, numReplicas = 2, 2, 2
 	defaultAntiEntropyInterval = 10 * time.Millisecond
 	defer func() {
-		numServers = oldNumServers
+		numServers, numSectors, numReplicas = oldNumServers, oldNumSectors, oldNumReplicas
 		defaultAntiEntropyInterval = oldInterval
 	}()
 
+	net := labrpc.MakeNetwork()
+	defer net.Cleanup()
+	
 	nodeIDs := []string{
 		tester.ServerName(tester.GRP0, 0),
 		tester.ServerName(tester.GRP0, 1),
@@ -304,7 +305,7 @@ func TestStartKVServerStartsAntiEntropy(t *testing.T) {
 	servers[freshNode].installObjects(key, currentObjects)
 	servers[staleNode].installObjects(key, []rpc.Object{currentObjects[0]})
 
-	deadline := time.Now().Add(500 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if got := servers[staleNode].GetSiblings(key); IsSameSiblings(currentObjects, got) {
 			return

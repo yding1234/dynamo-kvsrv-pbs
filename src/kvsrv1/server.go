@@ -13,7 +13,7 @@ import (
 
 const Debug = false
 
-var defaultAntiEntropyInterval = 10 * time.Second
+var defaultAntiEntropyInterval = 500 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
