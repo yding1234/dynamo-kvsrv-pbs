@@ -14,6 +14,10 @@ import (
 const Debug = false
 
 var defaultAntiEntropyInterval = 500 * time.Millisecond
+var defaultGossipInterval = 100 * time.Millisecond
+var defaultHeartbeatTimeout = 100 * time.Millisecond
+var defaultFailureTimeout = 500 * time.Millisecond
+var defaultCleanupTimeout = 1500 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -66,6 +70,12 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		keysInBuckets: make([][][]string, ring.NumSectors()),
 		antiEntropyInterval: defaultAntiEntropyInterval,
 		stopCh: make(chan struct{}),
+		members: make(map[string]rpc.MemberInfo, len(ends)),
+		numNeighbors: 2,
+		heartbeatTimeout: defaultHeartbeatTimeout,
+		gossipInterval: defaultGossipInterval,
+		failureTimeout: defaultFailureTimeout,
+		cleanupTimeout: defaultCleanupTimeout,
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -76,6 +86,23 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	}
 	for _, sector := range ring.GetSectors(serverID) {
 		kv.merkleRoots[sector] = kv.BuildMerkleTree(sector)
+	}
+	now := time.Now()
+	for nodeID := range ends {
+		kv.members[nodeID] = rpc.MemberInfo{
+			ServerID: nodeID,
+			Heartbeat: 0,
+			Status: rpc.Alive,
+			LastUpdated: now,
+		}
+	}
+	if _, ok := kv.members[serverID]; !ok {
+		kv.members[serverID] = rpc.MemberInfo{
+			ServerID: serverID,
+			Heartbeat: 0,
+			Status: rpc.Alive,
+			LastUpdated: now,
+		}
 	}
 
 	return kv
@@ -289,7 +316,10 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 	}
 	ring := chr.MakeConsistentHashRing(numReplicas, numSectors, len(ends), nodeIDs)
 	kv := MakeKVServer(tester.ServerName(gid, srv), ring, writeQuorum, readQuorum, endsMap)
+	// start background processes
 	kv.StartAntiEntropy() // start anti-entropy process
+	kv.StartSyncMembers()
+	kv.StartMembershipFailureDetector()
 	return []any{kv}
 }
 

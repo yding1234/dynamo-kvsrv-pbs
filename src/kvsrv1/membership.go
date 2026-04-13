@@ -3,6 +3,8 @@ package kvsrv
 import (
 	"math/rand"
 	"time"
+
+	"6.5840/kvsrv1/rpc"
 )
 
 func (kv *KVServer) StartSyncMembers() {
@@ -12,6 +14,7 @@ func (kv *KVServer) StartSyncMembers() {
 		for {
 			select {
 			case <-ticker.C:
+				kv.bumpLocalHeartbeat()
 				kv.SyncMembers()
 			case <-kv.stopCh:
 				return
@@ -20,120 +23,154 @@ func (kv *KVServer) StartSyncMembers() {
 	}()
 }
 
-func (kv *KVServer) SyncMembers() {
-	members := kv.members
-	// select numNeighbors random members to sync with
-	rand.Seed(time.Now().UnixNano())
-	membersToSync := kv.GetRandomNeighbors()
-
-	// send sync members request to random members
-	ch := make(chan SyncMembersResult, kv.numNeighbors)
-
-	type SyncMembersResult struct {
-		MemberInfos []rpc.MemberInfo
-		OK bool
-	}
-	for _, member := range membersToSync {
-		go func(member rpc.MemberInfo) {
-			ok := kv.ends[member.ServerID].Call("KVServer.GossipSyncMembers", &rpc.SyncMembersArgs{MemberInfos: members}, &rpc.SyncMembersReply{})
-			if ok {
-				ch <- SyncMembersResult{MemberInfos: reply.MemberInfos, OK: ok}
-			}
-			else {
-				ch <- SyncMembersResult{MemberInfos: nil, OK: false}
-			}
-		}(member)
-	}
-
-	// collect results
-	for i := 0; i < kv.numNeighbors; i++ {
-		result := <-ch
-		if result.OK {
-			// check returned member infos, and update my members
-			for _, member := range result.MemberInfos {
-				if !member.IsIn(kv.members) ||
-					member.Heartbeat > kv.members[member.ServerID].Heartbeat ||
-					(member.Heartbeat == kv.members[member.ServerID].Heartbeat && member.IsWorse(kv.members[member.ServerID])) {
-					kv.members[member.ServerID] = member
-				}
+func (kv *KVServer) StartMembershipFailureDetector() {
+	go func() {
+		ticker := time.NewTicker(kv.heartbeatTimeout)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				kv.detectMemberFailures()
+			case <-kv.stopCh:
+				return
 			}
 		}
+	}()
+}
+
+func (kv *KVServer) bumpLocalHeartbeat() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	kv.heartbeatCounter++
+	self := kv.members[kv.id]
+	self.Update(kv.heartbeatCounter, rpc.Alive)
+	kv.members[kv.id] = self
+}
+
+func (kv *KVServer) SyncMembers() {
+	membersToSync := kv.GetRandomNeighbors()
+	if len(membersToSync) == 0 {
+		return
+	}
+
+	snapshot := kv.GetAllMembers()
+	for _, member := range membersToSync {
+		go func(member rpc.MemberInfo) {
+			args := rpc.SyncMembersArgs{MemberInfos: snapshot}
+			reply := rpc.SyncMembersReply{}
+			ok := kv.ends[member.ServerID].Call("KVServer.GossipSyncMembers", &args, &reply)
+			if ok {
+				kv.mergeMembers(reply.MemberInfos)
+			}
+		}(member)
 	}
 }
 
 func (kv *KVServer) GossipSyncMembers(args *rpc.SyncMembersArgs, reply *rpc.SyncMembersReply) {
-	myMembers := kv.members
+	kv.mergeMembers(args.MemberInfos)
+	reply.MemberInfos = kv.GetAllMembers()
+}
 
-	// member infos to reply, including missing and stale member infos
-	replyMemberInfos := make([]rpc.MemberInfo, 0)
+func (kv *KVServer) mergeMembers(remote []rpc.MemberInfo) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 
-	missingMembers := kv.GetAllMembers()
-	
-	for _, member := range args.MemberInfos {
-		myMemberInfo := kv.members[member.ServerID]
-		// member is in my members
-		if member.IsIn(myMembers) {
-			missingMembers = deleteMember(missingMembers, member.ServerID)
-			if member.Heartbeat > myMemberInfo.Heartbeat {
-				myMemberInfo.Update(member.Heartbeat, member.Status)
-				if member.IsDead() {
-					kv.ring.RemoveNode(member.ServerID)
-				}
-			} else if member.Heartbeat < myMemberInfo.Heartbeat {
-				replyMemberInfos = append(replyMemberInfos, member)
-			} else { // heartbeat is the same
-				if member.IsWorse(myMemberInfo) {
-					myMemberInfo.Update(member.Heartbeat, member.Status)
-				} else if myMemberInfo.IsWorse(member) {
-					replyMemberInfos = append(replyMemberInfos, myMemberInfo)
-				}
+	for _, member := range remote {
+		current, ok := kv.members[member.ServerID]
+		if !ok {
+			member.LastUpdated = time.Now()
+			kv.members[member.ServerID] = member
+			continue
+		}
+
+		if member.ServerID == kv.id {
+			if member.Heartbeat > current.Heartbeat {
+				current.Update(member.Heartbeat, rpc.Alive)
+				kv.heartbeatCounter = member.Heartbeat
+				kv.members[member.ServerID] = current
 			}
-		} else { // member is not in my members
-			if member.IsAlive() {
-				kv.members[member.ServerID] = member
-				kv.ring.AddNode(member.ServerID)
+			continue
+		}
+
+		if member.Heartbeat > current.Heartbeat {
+			current.Update(member.Heartbeat, member.Status)
+			kv.members[member.ServerID] = current
+			continue
+		}
+		if member.Heartbeat < current.Heartbeat {
+			continue
+		}
+
+		if member.IsWorse(current) {
+			current.Update(member.Heartbeat, member.Status)
+			kv.members[member.ServerID] = current
+		}
+	}
+}
+
+func (kv *KVServer) detectMemberFailures() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	now := time.Now()
+	for serverID, member := range kv.members {
+		if serverID == kv.id {
+			continue
+		}
+
+		since := now.Sub(member.LastUpdated)
+		switch {
+		case since >= kv.cleanupTimeout:
+			if member.Status != rpc.Dead {
+				member.Update(member.Heartbeat, rpc.Dead)
+				kv.members[serverID] = member
+			}
+		case since >= kv.failureTimeout:
+			if member.Status == rpc.Alive {
+				member.Update(member.Heartbeat, rpc.Suspect)
+				kv.members[serverID] = member
 			}
 		}
 	}
-
-	// add missing members to replyMemberInfos
-	replyMemberInfos = append(replyMemberInfos, missingMembers...)
-
-	// reply
-	reply.MemberInfos = replyMemberInfos
 }
 
 func (kv *KVServer) GetRandomNeighbors() []rpc.MemberInfo {
-	members := kv.members
-	rand.Seed(time.Now().UnixNano())
-	randomMembers := make([]rpc.MemberInfo, kv.numNeighbors)
-	randIndex := 0
-	for i := 0; i < kv.numNeighbors; i++ {
-		randIndex = rand.Intn(len(members))
-		// skip myself and already selected members
-		for members[randIndex].ServerID == kv.id || members[randIndex].IsIn(RandomMembers) {
-			randIndex = rand.Intn(len(members))
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	candidates := make([]rpc.MemberInfo, 0, len(kv.members))
+	for _, member := range kv.members {
+		if member.ServerID == kv.id {
+			continue
 		}
-		randomMembers[i] = members[randIndex]
+		candidates = append(candidates, member)
 	}
-	return randomMembers
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	rand.Shuffle(len(candidates), func(i, j int) {
+		candidates[i], candidates[j] = candidates[j], candidates[i]
+	})
+
+	n := kv.numNeighbors
+	if n <= 0 || n > len(candidates) {
+		n = len(candidates)
+	}
+	return append([]rpc.MemberInfo(nil), candidates[:n]...)
 }
 
 func (kv *KVServer) GetAllMembers() []rpc.MemberInfo {
-	memberInfos := make([]rpc.MemberInfo, 0)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	memberInfos := make([]rpc.MemberInfo, 0, len(kv.members))
 	for _, memberInfo := range kv.members {
 		memberInfos = append(memberInfos, memberInfo)
 	}
 	return memberInfos
-}
-
-func deleteMember(members []rpc.MemberInfo, serverID string) []rpc.MemberInfo {
-	for i, member := range members {
-		if member.ServerID == serverID {
-			return append(members[:i], members[i+1:]...)
-		}
-	}
-	return members
 }
 
 
