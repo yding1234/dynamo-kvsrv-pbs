@@ -132,7 +132,11 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 
 	// forward the get request to the replicas
 
-	prefList := kv.ring.GetPreferenceList(args.Key)
+	prefList := kv.filterDeadMembers(kv.ring.GetPreferenceList(args.Key))
+	if len(prefList) < kv.readQuorum {
+		reply.Err = rpc.ErrReadQuorumNotMet
+		return
+	}
 	ch := make(chan rpc.ForwardGetResult, len(prefList))
 
 	for _, serverID := range prefList {
@@ -201,7 +205,11 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 
 	// forward the put request to the replicas
-	prefList := kv.ring.GetPreferenceList(args.Key)
+	prefList := kv.filterDeadMembers(kv.ring.GetPreferenceList(args.Key))
+	if len(prefList) < kv.writeQuorum {
+		reply.Err = rpc.ErrWriteQuorumNotMet
+		return
+	}
 	ch := make(chan rpc.ForwardPutResult, len(prefList))
 
 	writeObject := args.Object

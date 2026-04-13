@@ -170,5 +170,20 @@ func (kv *KVServer) GetAllMembers() []rpc.MemberInfo {
 	return memberInfos
 }
 
+func (kv *KVServer) filterDeadMembers(serverIDs []string) []string {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	filtered := make([]string, 0, len(serverIDs))
+	for _, serverID := range serverIDs {
+		member, ok := kv.members[serverID]
+		if !ok || member.Status == rpc.Dead {
+			continue
+		}
+		filtered = append(filtered, serverID)
+	}
+	return filtered
+}
+
 
 
