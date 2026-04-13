@@ -21,6 +21,8 @@ const (
 
 	// For anti-entropy
 	ErrNoHashValue = "ErrNoHashValue"
+
+	// For membership
 )
 
 // for get/put requests between the coordinator and the client
@@ -66,12 +68,12 @@ type RepairReply struct {
     Err Err
 }
 
+// for anti-entropy
 type TreeSummary struct {
 	Sector int // the sector ID of the tree
     Hashes    [][32]byte // the hashes of the nodes in the tree
 }
 
-// for anti-entropy
 type RepairGetDiffArgs struct {
 	Sector int // the sector ID to be reconciled with
 	Summary TreeSummary
@@ -83,32 +85,16 @@ type KeyInfo struct {
     Objects []Object
 }
 
-// TODO: TO BE CHECKED
 type RepairGetDiffReply struct {
 	DiffKeyInfos []KeyInfo
 	Err Err
 }
 
-type AntiEntropyHashArgs struct {
-    SectorID int
-    Level    int
+// for membership gossip
+type SyncMembersArgs struct {
+	MemberInfos []MemberInfo
 }
 
-type AntiEntropyHashReply struct {
-    Err  Err
-    Hash [32]byte
-}
-
-// 如果某个 range hash 不同，就请求它的左右子区间 hash。
-type AntiEntropyChildrenReply struct {
-    Err       Err
-    LeftHash  [32]byte
-    RightHash [32]byte
-    MidKey string // the key of the middle child
-}
-
-// 到叶子后，直接拿这个 leaf 里的 key 和对象集。
-type AntiEntropyLeafReply struct {
-    Err   Err
-    Items map[string][]Object
+type SyncMembersReply struct {
+	MemberInfos []MemberInfo
 }

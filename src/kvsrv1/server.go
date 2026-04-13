@@ -29,15 +29,15 @@ type KVServer struct {
 	id       string
 	kv       map[string][]rpc.Object // key -> list of objects
 
-	// for consistent hashing
+	// consistent hashing
 	ring        *chr.ConsistentHashRing
 	writeQuorum int
 	readQuorum  int
 
-	// for forwarding requests to the replicas
+	// forwarding requests to the replicas
 	ends map[string]*labrpc.ClientEnd
 
-	// for anti-entropy
+	// anti-entropy
 	// merkleRoots map[int]rpc.TreeSummary // sector ID -> merkle tree summary
 	merkleRoots map[int]*MerkleNode // sector ID -> merkle root
 	keysInBuckets [][][]string // sector ID -> bucket ID -> keys
@@ -45,6 +45,13 @@ type KVServer struct {
 	stopCh chan struct{}
 
 	// membership
+	members map[string]rpc.MemberInfo // server ID -> member info
+	numNeighbors int // number of neighbors to gossip with
+	heartbeatCounter uint64 // heartbeat counter
+	heartbeatTimeout time.Duration
+	gossipInterval time.Duration
+	failureTimeout time.Duration // time to consider a node as suspect
+	cleanupTimeout time.Duration // time to consider a node as dead
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
