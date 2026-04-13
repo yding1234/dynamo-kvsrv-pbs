@@ -43,6 +43,8 @@ type KVServer struct {
 	keysInBuckets [][][]string // sector ID -> bucket ID -> keys
 	antiEntropyInterval time.Duration
 	stopCh chan struct{}
+
+	// membership
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
