@@ -13,6 +13,8 @@ import (
 
 const Debug = false
 
+var defaultAntiEntropyInterval = 10 * time.Second
+
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		log.Printf(format, a...)
@@ -53,7 +55,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		ends:        ends,
 		merkleRoots: make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
 		keysInBuckets: make([][][]string, ring.NumSectors()),
-		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
+		antiEntropyInterval: defaultAntiEntropyInterval,
 		stopCh: make(chan struct{}),
 	}
 
@@ -278,6 +280,7 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 	}
 	ring := chr.MakeConsistentHashRing(numReplicas, numSectors, len(ends), nodeIDs)
 	kv := MakeKVServer(tester.ServerName(gid, srv), ring, writeQuorum, readQuorum, endsMap)
+	kv.StartAntiEntropy() // start anti-entropy process
 	return []any{kv}
 }
 

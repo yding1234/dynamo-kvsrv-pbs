@@ -106,6 +106,133 @@ func TestReadRepairRepairsErrNoKeyReplica(t *testing.T) {
 	})
 }
 
+func TestReadRepairEventuallyRepairsStaleReplicaUnreliable(t *testing.T) {
+	ts := MakeTestKV(t, false)
+	defer ts.Cleanup()
+
+	ts.Begin("Read repair eventually repairs stale replica under unreliable network")
+
+	ck := ts.MakeClerk()
+	tck := ck.(*kvtest.TestClerk)
+
+	const key = "k-read-repair-unreliable"
+
+	putUntilOK := func(value string, ctx rpc.Context) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			err := ck.Put(key, value, ctx)
+			if err == rpc.OK {
+				return
+			}
+			if err == rpc.ErrVersion {
+				return
+			}
+			if err == rpc.ErrMaybe || err == rpc.ErrWriteQuorumNotMet || err == rpc.ErrNotCoordinator {
+				continue
+			}
+			t.Fatalf("put %q failed with unexpected err=%v", value, err)
+		}
+		t.Fatalf("put %q did not succeed before deadline", value)
+	}
+
+	getUntilOK := func() rpc.Context {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			_, ctx, err := ck.Get(key)
+			if err == rpc.OK {
+				return ctx
+			}
+			if err == rpc.ErrReadQuorumNotMet || err == rpc.ErrNotCoordinator || err == rpc.ErrRPCFailure {
+				continue
+			}
+			t.Fatalf("get failed with unexpected err=%v", err)
+		}
+		t.Fatalf("get did not succeed before deadline")
+		return zeroContext()
+	}
+
+	coordGetUntilOK := func() []rpc.Object {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			reply := rawCoordGet(t, tck, key)
+			if reply.Err == rpc.OK {
+				return reply.Objects
+			}
+			if reply.Err == rpc.ErrReadQuorumNotMet || reply.Err == rpc.ErrNotCoordinator {
+				continue
+			}
+			t.Fatalf("coord get failed with unexpected err=%v", reply.Err)
+		}
+		t.Fatalf("coord get did not succeed before deadline")
+		return nil
+	}
+
+	replicaGetEventually := func(server string) rpc.GetReply {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			args := rpc.GetArgs{Key: key}
+			reply := rpc.GetReply{}
+			ok := tck.Clnt.Call(server, "KVServer.ReplicaGet", &args, &reply)
+			if ok {
+				return reply
+			}
+		}
+		return rpc.GetReply{Err: rpc.ErrRPCFailure}
+	}
+
+	repairPutUntilOK := func(server string, args *rpc.RepairArgs) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			reply := rpc.RepairReply{}
+			ok := tck.Clnt.Call(server, "KVServer.RepairPut", args, &reply)
+			if ok && reply.Err == rpc.OK {
+				return
+			}
+		}
+		t.Fatalf("RepairPut to %s did not succeed before deadline", server)
+	}
+
+	putUntilOK("base", zeroContext())
+	baseCtx := getUntilOK()
+
+	putUntilOK("va", makeConcurrentContext(baseCtx, "writer-A", 1))
+	putUntilOK("vb", makeConcurrentContext(baseCtx, "writer-B", 2))
+
+	prefList := preferenceListForKey(key)
+	target := prefList[len(prefList)-1]
+	canonicalObjects := coordGetUntilOK()
+	if got := len(canonicalObjects); got != 2 {
+		t.Fatalf("expected 2 canonical siblings, got %d", got)
+	}
+
+	repairPutUntilOK(target, &rpc.RepairArgs{
+		Key:     key,
+		Objects: []rpc.Object{canonicalObjects[0]},
+	})
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		trigger := rawCoordGet(t, tck, key)
+		if trigger.Err != rpc.OK && trigger.Err != rpc.ErrReadQuorumNotMet && trigger.Err != rpc.ErrNotCoordinator {
+			t.Fatalf("trigger get failed with unexpected err=%v", trigger.Err)
+		}
+
+		got := replicaGetEventually(target)
+		if got.Err == rpc.OK && IsSameSiblings(canonicalObjects, got.Objects) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	final := replicaGetEventually(target)
+	t.Fatalf("read repair did not converge under unreliable network; final err=%v objects=%d", final.Err, len(final.Objects))
+}
+
 func collectCanonicalReplicaSiblings(t *testing.T, tck *kvtest.TestClerk, key string, prefList []string) []rpc.Object {
 	t.Helper()
 

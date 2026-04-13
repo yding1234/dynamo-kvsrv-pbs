@@ -7,6 +7,7 @@ import (
 	"6.5840/chr"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
+	"6.5840/tester1"
 )
 
 func makeAntiEntropyUnitServer() *KVServer {
@@ -235,4 +236,132 @@ func TestStartAntiEntropyRepairsStaleReplica(t *testing.T) {
 
 	final := servers[staleNode].GetSiblings(key)
 	t.Fatalf("expected background anti-entropy to repair stale replica, got %v want %v", final, currentObjects)
+}
+
+func TestStartKVServerStartsAntiEntropy(t *testing.T) {
+	net := labrpc.MakeNetwork()
+	defer net.Cleanup()
+
+	oldNumServers := numServers
+	numServers = 2
+	oldInterval := defaultAntiEntropyInterval
+	defaultAntiEntropyInterval = 10 * time.Millisecond
+	defer func() {
+		numServers = oldNumServers
+		defaultAntiEntropyInterval = oldInterval
+	}()
+
+	nodeIDs := []string{
+		tester.ServerName(tester.GRP0, 0),
+		tester.ServerName(tester.GRP0, 1),
+	}
+
+	ends := make([][]*labrpc.ClientEnd, len(nodeIDs))
+	for i, from := range nodeIDs {
+		ends[i] = make([]*labrpc.ClientEnd, len(nodeIDs))
+		for j, to := range nodeIDs {
+			endName := from + "->" + to
+			end := net.MakeEnd(endName)
+			net.Connect(endName, to)
+			net.Enable(endName, true)
+			ends[i][j] = end
+		}
+	}
+
+	servers := make(map[string]*KVServer, len(nodeIDs))
+	for i, nodeID := range nodeIDs {
+		started := StartKVServer(nil, ends[i], tester.GRP0, i, nil)
+		kv := started[0].(*KVServer)
+		servers[nodeID] = kv
+	}
+	defer func() {
+		for _, kv := range servers {
+			close(kv.stopCh)
+		}
+	}()
+
+	for _, nodeID := range nodeIDs {
+		rs := labrpc.MakeServer()
+		rs.AddService(labrpc.MakeService(servers[nodeID]))
+		net.AddServer(nodeID, rs)
+	}
+
+	ring := servers[nodeIDs[0]].ring
+
+	const key = "anti-entropy-startkvserver"
+	sector, _ := ring.GetLocation(key)
+	freshNode := ring.GetNodeID(sector)
+	staleNode := nodeIDs[0]
+	if staleNode == freshNode {
+		staleNode = nodeIDs[1]
+	}
+
+	currentObjects := []rpc.Object{
+		makeTestObject("va", 20, "etag-a", map[string]uint64{"writer-a": 1}),
+		makeTestObject("vb", 21, "etag-b", map[string]uint64{"writer-b": 1}),
+	}
+
+	servers[freshNode].installObjects(key, currentObjects)
+	servers[staleNode].installObjects(key, []rpc.Object{currentObjects[0]})
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if got := servers[staleNode].GetSiblings(key); IsSameSiblings(currentObjects, got) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	final := servers[staleNode].GetSiblings(key)
+	t.Fatalf("expected StartKVServer to start anti-entropy automatically, got %v want %v", final, currentObjects)
+}
+
+func TestStartAntiEntropyEventuallyRepairsStaleReplicaUnreliable(t *testing.T) {
+	ring, servers, cleanup := makeSmallAntiEntropyCluster(t)
+	defer cleanup()
+
+	const key = "anti-entropy-unreliable"
+	sector, _ := ring.GetLocation(key)
+	freshNode := ring.GetNodeID(sector)
+	staleNode := "s1"
+	if staleNode == freshNode {
+		staleNode = "s2"
+	}
+
+	currentObjects := []rpc.Object{
+		makeTestObject("va", 20, "etag-a", map[string]uint64{"writer-a": 1}),
+		makeTestObject("vb", 21, "etag-b", map[string]uint64{"writer-b": 1}),
+	}
+
+	servers[freshNode].installObjects(key, currentObjects)
+	servers[staleNode].installObjects(key, []rpc.Object{currentObjects[0]})
+	servers[freshNode].antiEntropyInterval = 10 * time.Millisecond
+	for _, kv := range servers {
+		for _, end := range kv.ends {
+			end.SetCall(func(endname, svcMeth string, args []byte) ([]byte, bool) {
+				if time.Now().UnixNano()%3 == 0 {
+					return nil, false
+				}
+				return end.Forward(svcMeth, args)
+			})
+		}
+	}
+
+	before := servers[staleNode].GetSiblings(key)
+	if IsSameSiblings(currentObjects, before) {
+		t.Fatal("expected stale replica to start out outdated")
+	}
+
+	servers[freshNode].StartAntiEntropy()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := servers[staleNode].GetSiblings(key); IsSameSiblings(currentObjects, got) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	final := servers[staleNode].GetSiblings(key)
+	t.Fatalf("expected background anti-entropy to repair stale replica under unreliable network, got %v want %v", final, currentObjects)
 }

@@ -7,7 +7,7 @@ import (
 )
 
 func (kv *KVServer) StartAntiEntropy() {
-	rand.Seed(int64(time.Now().UnixNano())) 
+	rand.Seed(int64(time.Now().UnixNano()))
 	go func() {
 		ticker := time.NewTicker(kv.antiEntropyInterval)
 		defer ticker.Stop()
