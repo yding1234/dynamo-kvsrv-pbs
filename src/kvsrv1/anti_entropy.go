@@ -44,7 +44,10 @@ func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	}
 	summary := root.ToSummary()
 	
-	repairGetDiffArgs := rpc.RepairGetDiffArgs{Sector: neighborSector, Summary: summary}
+	// All replicas index the same key-space sector locally, so the remote side
+	// must compare against the same sector ID even if it is reached via a
+	// different neighbor sector on the ring.
+	repairGetDiffArgs := rpc.RepairGetDiffArgs{Sector: sector, Summary: summary}
 	repairGetDiffReply := rpc.RepairGetDiffReply{}
 	
 	ok = kv.ends[neighborNode].Call("KVServer.RepairGetDiff", &repairGetDiffArgs, &repairGetDiffReply)
