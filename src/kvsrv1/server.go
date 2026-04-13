@@ -18,6 +18,7 @@ var defaultGossipInterval = 100 * time.Millisecond
 var defaultHeartbeatTimeout = 100 * time.Millisecond
 var defaultFailureTimeout = 500 * time.Millisecond
 var defaultCleanupTimeout = 1500 * time.Millisecond
+var defaultHintedHandoffInterval = 100 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -57,6 +58,10 @@ type KVServer struct {
 	gossipInterval time.Duration
 	failureTimeout time.Duration // time to consider a node as suspect
 	cleanupTimeout time.Duration // time to consider a node as dead
+
+	// hinted handoff
+	hints map[string][]HintedWrite // original target -> pending hinted writes
+	hintedHandoffInterval time.Duration
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
@@ -78,6 +83,8 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		gossipInterval: defaultGossipInterval,
 		failureTimeout: defaultFailureTimeout,
 		cleanupTimeout: defaultCleanupTimeout,
+		hints: make(map[string][]HintedWrite),
+		hintedHandoffInterval: defaultHintedHandoffInterval,
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -204,36 +211,80 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		return
 	}
 
-	// forward the put request to the replicas
-	prefList := kv.filterDeadMembers(kv.ring.GetPreferenceList(args.Key))
-	if len(prefList) < kv.writeQuorum {
-		reply.Err = rpc.ErrWriteQuorumNotMet
-		return
-	}
-	ch := make(chan rpc.ForwardPutResult, len(prefList))
+	// forward the put request to the replicas or hinted-handoff targets
+	prefList := kv.ring.GetPreferenceList(args.Key)
 
 	writeObject := args.Object
 	writeObject.Context = args.BaseContext
 	writeObject.Context.Update(kv.id, writeObject.Value)
-	
+
+	type putPlan struct {
+		targetServer  string
+		handoffServer string
+	}
+
+	usedServers := make(map[string]bool, len(prefList))
 	for _, serverID := range prefList {
-		go func(serverID string) {
+		usedServers[serverID] = true
+	}
+
+	plans := make([]putPlan, 0, len(prefList))
+	actionablePlans := 0
+	for _, serverID := range prefList {
+		if kv.isDead(serverID) {
+			handoffServer, ok := kv.chooseHandoffNode(usedServers)
+			if ok {
+				usedServers[handoffServer] = true
+				plans = append(plans, putPlan{targetServer: serverID, handoffServer: handoffServer})
+				actionablePlans++
+			}
+			continue
+		}
+		plans = append(plans, putPlan{targetServer: serverID})
+		actionablePlans++
+	}
+
+	if actionablePlans < kv.writeQuorum {
+		reply.Err = rpc.ErrWriteQuorumNotMet
+		return
+	}
+
+	ch := make(chan rpc.ForwardPutResult, actionablePlans)
+	for _, plan := range plans {
+		go func(plan putPlan) {
+			if plan.handoffServer != "" {
+				hintedArgs := rpc.HintedPutArgs{
+					TargetServer: plan.targetServer,
+					Key:          args.Key,
+					Object:       writeObject,
+					BaseContext:  args.BaseContext.Copy(),
+				}
+				hintedReply := rpc.HintedPutReply{}
+				ok := kv.ends[plan.handoffServer].Call("KVServer.HintedPut", &hintedArgs, &hintedReply)
+				if !ok {
+					ch <- rpc.ForwardPutResult{OK: false}
+					return
+				}
+				ch <- rpc.ForwardPutResult{OK: true, Err: hintedReply.Err}
+				return
+			}
+
 			forwardArgs := rpc.PutArgs{Key: args.Key, Object: writeObject, BaseContext: args.BaseContext}
 			forwardReply := rpc.PutReply{}
-			ok := kv.ends[serverID].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
+			ok := kv.ends[plan.targetServer].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
 			if !ok {
 				ch <- rpc.ForwardPutResult{OK: false}
 				return
 			}
 			ch <- rpc.ForwardPutResult{OK: true, Err: forwardReply.Err}
-		}(serverID)
+		}(plan)
 	}
 
 	// check the results from the replicas
 	successCount := 0
 	versionErrCount := 0
 	noKeyCount := 0
-	for i := 0; i < len(prefList); i++ {
+	for i := 0; i < actionablePlans; i++ {
 		res := <-ch
 		if !res.OK {
 			continue
@@ -330,6 +381,7 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 	kv.StartAntiEntropy() // start anti-entropy process
 	kv.StartSyncMembers()
 	kv.StartMembershipFailureDetector()
+	kv.StartHintedHandoff()
 	return []any{kv}
 }
 

@@ -57,6 +57,17 @@ type ForwardPutResult struct {
 	Err Err
 }
 
+type HintedPutArgs struct {
+	TargetServer string
+	Key          string
+	Object       Object
+	BaseContext  Context
+}
+
+type HintedPutReply struct {
+	Err Err
+}
+
 // for read repair
 type RepairArgs struct {
     Key     string
