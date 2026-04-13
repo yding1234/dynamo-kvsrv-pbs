@@ -48,15 +48,14 @@ func TestMergeMembersSameHeartbeatPrefersWorseStatus(t *testing.T) {
 	member := kv.members["s2"]
 	member.Heartbeat = 7
 	member.Status = rpc.Alive
-	member.LastUpdated = time.Now()
 	kv.members["s2"] = member
+	kv.memberLastUpdated["s2"] = time.Now()
 	kv.mu.Unlock()
 
 	kv.mergeMembers([]rpc.MemberInfo{{
-		ServerID:    "s2",
-		Heartbeat:   7,
-		Status:      rpc.Suspect,
-		LastUpdated: time.Now(),
+		ServerID:  "s2",
+		Heartbeat: 7,
+		Status:    rpc.Suspect,
 	}})
 
 	kv.mu.Lock()
@@ -75,9 +74,9 @@ func TestDetectMemberFailuresMarksSuspectAndDead(t *testing.T) {
 
 	kv.mu.Lock()
 	member := kv.members["s2"]
-	member.LastUpdated = time.Now().Add(-75 * time.Millisecond)
 	member.Status = rpc.Alive
 	kv.members["s2"] = member
+	kv.memberLastUpdated["s2"] = time.Now().Add(-75 * time.Millisecond)
 	kv.mu.Unlock()
 
 	kv.detectMemberFailures()
@@ -91,9 +90,9 @@ func TestDetectMemberFailuresMarksSuspectAndDead(t *testing.T) {
 
 	kv.mu.Lock()
 	member = kv.members["s2"]
-	member.LastUpdated = time.Now().Add(-150 * time.Millisecond)
 	member.Status = rpc.Suspect
 	kv.members["s2"] = member
+	kv.memberLastUpdated["s2"] = time.Now().Add(-150 * time.Millisecond)
 	kv.mu.Unlock()
 
 	kv.detectMemberFailures()

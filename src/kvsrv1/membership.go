@@ -46,6 +46,7 @@ func (kv *KVServer) bumpLocalHeartbeat() {
 	self := kv.members[kv.id]
 	self.Update(kv.heartbeatCounter, rpc.Alive)
 	kv.members[kv.id] = self
+	kv.memberLastUpdated[kv.id] = time.Now()
 }
 
 func (kv *KVServer) SyncMembers() {
@@ -79,8 +80,8 @@ func (kv *KVServer) mergeMembers(remote []rpc.MemberInfo) {
 	for _, member := range remote {
 		current, ok := kv.members[member.ServerID]
 		if !ok {
-			member.LastUpdated = time.Now()
 			kv.members[member.ServerID] = member
+			kv.memberLastUpdated[member.ServerID] = time.Now()
 			continue
 		}
 
@@ -89,6 +90,7 @@ func (kv *KVServer) mergeMembers(remote []rpc.MemberInfo) {
 				current.Update(member.Heartbeat, rpc.Alive)
 				kv.heartbeatCounter = member.Heartbeat
 				kv.members[member.ServerID] = current
+				kv.memberLastUpdated[member.ServerID] = time.Now()
 			}
 			continue
 		}
@@ -96,6 +98,7 @@ func (kv *KVServer) mergeMembers(remote []rpc.MemberInfo) {
 		if member.Heartbeat > current.Heartbeat {
 			current.Update(member.Heartbeat, member.Status)
 			kv.members[member.ServerID] = current
+			kv.memberLastUpdated[member.ServerID] = time.Now()
 			continue
 		}
 		if member.Heartbeat < current.Heartbeat {
@@ -105,6 +108,7 @@ func (kv *KVServer) mergeMembers(remote []rpc.MemberInfo) {
 		if member.IsWorse(current) {
 			current.Update(member.Heartbeat, member.Status)
 			kv.members[member.ServerID] = current
+			kv.memberLastUpdated[member.ServerID] = time.Now()
 		}
 	}
 }
@@ -119,7 +123,12 @@ func (kv *KVServer) detectMemberFailures() {
 			continue
 		}
 
-		since := now.Sub(member.LastUpdated)
+		lastUpdated, ok := kv.memberLastUpdated[serverID]
+		if !ok {
+			lastUpdated = now
+			kv.memberLastUpdated[serverID] = now
+		}
+		since := now.Sub(lastUpdated)
 		switch {
 		case since >= kv.cleanupTimeout:
 			if member.Status != rpc.Dead {

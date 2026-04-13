@@ -50,6 +50,7 @@ type KVServer struct {
 
 	// membership
 	members map[string]rpc.MemberInfo // server ID -> member info
+	memberLastUpdated map[string]time.Time
 	numNeighbors int // number of neighbors to gossip with
 	heartbeatCounter uint64 // heartbeat counter
 	heartbeatTimeout time.Duration
@@ -71,6 +72,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		antiEntropyInterval: defaultAntiEntropyInterval,
 		stopCh: make(chan struct{}),
 		members: make(map[string]rpc.MemberInfo, len(ends)),
+		memberLastUpdated: make(map[string]time.Time, len(ends)),
 		numNeighbors: 2,
 		heartbeatTimeout: defaultHeartbeatTimeout,
 		gossipInterval: defaultGossipInterval,
@@ -93,16 +95,16 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 			ServerID: nodeID,
 			Heartbeat: 0,
 			Status: rpc.Alive,
-			LastUpdated: now,
 		}
+		kv.memberLastUpdated[nodeID] = now
 	}
 	if _, ok := kv.members[serverID]; !ok {
 		kv.members[serverID] = rpc.MemberInfo{
 			ServerID: serverID,
 			Heartbeat: 0,
 			Status: rpc.Alive,
-			LastUpdated: now,
 		}
+		kv.memberLastUpdated[serverID] = now
 	}
 
 	return kv

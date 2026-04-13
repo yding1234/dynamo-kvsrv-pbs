@@ -1,7 +1,5 @@
 package rpc
 
-import "time"
-
 type NodeStatus int
 
 const (
@@ -14,13 +12,11 @@ type MemberInfo struct {
 	ServerID    string
 	Heartbeat   uint64
 	Status      NodeStatus
-	LastUpdated time.Time
 }
 
 func (m *MemberInfo) Update(heartbeat uint64, status NodeStatus) {
 	m.Heartbeat = heartbeat
 	m.Status = status
-	m.LastUpdated = time.Now()
 }
 
 func (m MemberInfo) IsIn(selectedMembers []MemberInfo) bool {
