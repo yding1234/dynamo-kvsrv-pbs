@@ -33,15 +33,22 @@ func AddObject(siblings []Object, candidate Object, sort func(i, j Object) bool)
     if sort == nil {
         sort = SortByTimestamp
     }
-    kept := make([]Object, len(siblings)+1)
+    kept := make([]Object, 0, len(siblings)+1)
 
     added := false
     for _, sibling := range siblings {
-        if candidate.Context.Compare(sibling.Context) == vclock.After { continue }
-        if !added && sort(candidate, sibling) {
-            kept = append(kept, candidate)
+        cmp := candidate.Context.Compare(sibling.Context)
+        if cmp == vclock.After {
+            continue
+        }
+        if cmp == vclock.Equal {
+            kept = append(kept, sibling)
             added = true
             continue
+        }
+        if !added && (cmp == vclock.Before || (cmp == vclock.Concurrent && sort(candidate, sibling))) {
+            kept = append(kept, candidate)
+            added = true
         }
         kept = append(kept, sibling)
     }
@@ -57,12 +64,13 @@ func AddObject(siblings []Object, candidate Object, sort func(i, j Object) bool)
 func MergeObjects(objects []Object, otherObjects []Object) []Object {
     merged := make([]Object, 0, len(objects)+len(otherObjects))
     for _, obj := range objects {
-        merged, _ = AddObject(merged, obj, nil) // nil means no specify sort function
+        merged = AddObject(merged, obj, nil) // nil means no specify sort function
     }
     for _, obj := range otherObjects {
-        merged, _ = AddObject(merged, obj, nil)
+        merged = AddObject(merged, obj, nil)
     }
     return merged
+}
 
 // precondition: i.Context.Compare(j.Context) = vclock.Concurrent or vclock.After
 func SortByTimestamp(i, j Object) bool {

@@ -52,7 +52,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		readQuorum:  readQuorum,
 		ends:        ends,
 		merkleRoots: make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
-		keysInBuckets: make([][][]string, len(ring.numSectors)),
+		keysInBuckets: make([][][]string, ring.NumSectors()),
 		antiEntropyInterval: time.Second * 10, // default interval is 10 seconds
 		stopCh: make(chan struct{}),
 	}
@@ -62,6 +62,9 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		for j := 0; j < ring.BucketsPerSector(); j++ {
 			kv.keysInBuckets[i][j] = make([]string, 0)
 		}
+	}
+	for _, sector := range ring.GetSectors(serverID) {
+		kv.merkleRoots[sector] = kv.BuildMerkleTree(sector)
 	}
 
 	return kv
@@ -250,10 +253,10 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// otherwise, install the siblings
 	kv.kv[args.Key] = rpc.AddObject(siblings, args.Object, nil) // nil means no specify sort function
 
-	// if the context is initial, add the key to the sector-keys map
+	// If this is the first version for the key, add it to the bucket index too.
 	if args.BaseContext.IsInitial() {
-		sector := kv.ring.GetCoordinator(args.Key)
-		kv.sectorKeys[sector] = append(kv.sectorKeys[sector], args.Key)
+		sector, bucket := kv.ring.GetLocation(args.Key)
+		kv.keysInBuckets[sector][bucket] = appendUniqueKey(kv.keysInBuckets[sector][bucket], args.Key)
 	}
 	reply.Err = rpc.OK
 	return
@@ -294,12 +297,15 @@ func (kv *KVServer) CopySectorKeys() map[int][]string {
     kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-    sectorKeysCopy := make(map[int][]string, len(kv.sectorKeys))
-    for sectorID, keys := range kv.sectorKeys {
-        sectorKeysCopy[sectorID] = make([]string, len(keys))
-        copy(sectorKeysCopy[sectorID], keys)
+    sectorKeysCopy := make(map[int][]string, len(kv.keysInBuckets))
+    for sectorID, buckets := range kv.keysInBuckets {
+        keys := make([]string, 0)
+        for _, bucketKeys := range buckets {
+            keys = append(keys, bucketKeys...)
+        }
+        sectorKeysCopy[sectorID] = keys
     }
-    
+
 	return sectorKeysCopy
 }
 
@@ -336,12 +342,14 @@ func (kv *KVServer) GetClientEnd(serverID string) *labrpc.ClientEnd {
 	return kv.ends[serverID]
 }
 
-func (kv *KVServer) GetKeysFromSector(sector int) {
+func (kv *KVServer) GetKeysFromSector(sector int) []string {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	keys := make([]string, len(sectorKeys[sector]))
-	copy(keys, sectorKeys[sector])
+	keys := make([]string, 0)
+	for _, bucketKeys := range kv.keysInBuckets[sector] {
+		keys = append(keys, bucketKeys...)
+	}
 	return keys
 }
 
@@ -362,7 +370,7 @@ func (kv *KVServer) GetKeysFromBucket(sector int, bucket int) []string {
 	return keys
 }
 
-func (kv *KVServer) GetBucketsFromSector(sector int) [][]string {
+func (kv *KVServer) GetBucketsFromSector(sector int) []int {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
@@ -373,4 +381,51 @@ func (kv *KVServer) GetBucketsFromSector(sector int) [][]string {
 		}
 	}
 	return buckets
+}
+
+func appendUniqueKey(keys []string, key string) []string {
+	for _, existing := range keys {
+		if existing == key {
+			return keys
+		}
+	}
+	return append(keys, key)
+}
+
+func removeKey(keys []string, key string) []string {
+	for i, existing := range keys {
+		if existing == key {
+			return append(keys[:i], keys[i+1:]...)
+		}
+	}
+	return keys
+}
+
+func (kv *KVServer) refreshMerkleTreeForSector(sector int) {
+	newRoot := kv.BuildMerkleTree(sector)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.merkleRoots[sector] = newRoot
+}
+
+func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
+	sector, bucket := kv.ring.GetLocation(key)
+
+	kv.mu.Lock()
+	if len(objects) == 0 {
+		delete(kv.kv, key)
+		kv.keysInBuckets[sector][bucket] = removeKey(kv.keysInBuckets[sector][bucket], key)
+		kv.mu.Unlock()
+		kv.refreshMerkleTreeForSector(sector)
+		return
+	}
+
+	_, existed := kv.kv[key]
+	kv.kv[key] = rpc.CopyObjects(objects)
+	if !existed {
+		kv.keysInBuckets[sector][bucket] = appendUniqueKey(kv.keysInBuckets[sector][bucket], key)
+	}
+	kv.mu.Unlock()
+
+	kv.refreshMerkleTreeForSector(sector)
 }

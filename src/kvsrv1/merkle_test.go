@@ -3,10 +3,11 @@ package kvsrv
 // go test ./kvsrv1 -run 'Test.*Merkle' -v
 
 import (
-	"reflect"
 	"testing"
 
+	"6.5840/chr"
 	"6.5840/kvsrv1/rpc"
+	"6.5840/labrpc"
 	"6.5840/vclock"
 )
 
@@ -25,42 +26,33 @@ func makeTestObject(value string, timestamp uint64, etag string, versions map[st
 	}
 }
 
-func makeMerkleSnapshot() (map[string][]rpc.Object, map[int][]string) {
-	return map[string][]rpc.Object{
-			"alpha": {
-				makeTestObject("A1", 10, "etag-a1", map[string]uint64{"s1": 1}),
-			},
-			"beta": {
-				makeTestObject("B1", 20, "etag-b1", map[string]uint64{"s1": 1, "s2": 1}),
-				makeTestObject("B2", 30, "etag-b2", map[string]uint64{"s3": 1}),
-			},
-			"gamma": {
-				makeTestObject("G1", 40, "etag-g1", map[string]uint64{"s2": 2}),
-			},
-		}, map[int][]string{
-			1: {"alpha", "beta"},
-			2: {"gamma"},
-		}
+func makeMerkleTestServer() *KVServer {
+	ring := chr.MakeConsistentHashRing(2, 4, 1, []string{"s1"})
+	kv := MakeKVServer("s1", ring, 1, 1, map[string]*labrpc.ClientEnd{})
+	kv.installObjects("alpha", []rpc.Object{
+		makeTestObject("A1", 10, "etag-a1", map[string]uint64{"s1": 1}),
+	})
+	kv.installObjects("beta", []rpc.Object{
+		makeTestObject("B1", 20, "etag-b1", map[string]uint64{"s1": 1, "s2": 1}),
+		makeTestObject("B2", 30, "etag-b2", map[string]uint64{"s3": 1}),
+	})
+	kv.installObjects("gamma", []rpc.Object{
+		makeTestObject("G1", 40, "etag-g1", map[string]uint64{"s2": 2}),
+	})
+	return kv
 }
 
 func TestCopyKVAndSectorKeysDeepCopy(t *testing.T) {
-	server := &KVServer{
-		kv: map[string][]rpc.Object{
-			"alpha": {
-				makeTestObject("A1", 10, "etag-a1", map[string]uint64{"s1": 1}),
-			},
-		},
-		sectorKeys: map[int][]string{
-			1: {"alpha"},
-		},
-	}
+	server := makeMerkleTestServer()
 
 	kvCopy := server.CopyKV()
 	sectorsCopy := server.CopySectorKeys()
+	sector, _ := server.ring.GetLocation("alpha")
 
 	server.kv["alpha"][0].Value = "changed"
 	server.kv["alpha"][0].Context.ETag = "changed-etag"
-	server.sectorKeys[1][0] = "changed-key"
+	sectorsCopyMutation := server.CopySectorKeys()
+	sectorsCopyMutation[sector][0] = "changed-key"
 
 	if got := kvCopy["alpha"][0].Value; got != "A1" {
 		t.Fatalf("kv copy should not share object storage, got value %q", got)
@@ -68,65 +60,64 @@ func TestCopyKVAndSectorKeysDeepCopy(t *testing.T) {
 	if got := kvCopy["alpha"][0].Context.ETag; got != "etag-a1" {
 		t.Fatalf("kv copy should preserve original context, got etag %q", got)
 	}
-	if got := sectorsCopy[1][0]; got != "alpha" {
-		t.Fatalf("sector keys copy should not share slice storage, got key %q", got)
+	if len(sectorsCopy[sector]) == 0 {
+		t.Fatal("expected copied sector keys to contain data")
+	}
+	foundAlpha := false
+	for _, key := range sectorsCopy[sector] {
+		if key == "alpha" {
+			foundAlpha = true
+			break
+		}
+	}
+	if !foundAlpha {
+		t.Fatalf("sector keys copy should preserve alpha in sector %d, got %v", sector, sectorsCopy[sector])
+	}
+	if len(sectorsCopyMutation[sector]) == 0 {
+		t.Fatal("expected copied sector keys mutation slice to contain data")
+	}
+	if sectorsCopyMutation[sector][0] == sectorsCopy[sector][0] {
+		t.Fatal("expected independent sector key copies")
 	}
 }
 
 func TestGetNodeDigestLeafChangesWhenDataChanges(t *testing.T) {
-	kvCopy, sectorsCopy := makeMerkleSnapshot()
+	kv := makeMerkleTestServer()
+	sector, bucket := kv.ring.GetLocation("alpha")
+	leaf := kv.MakeMerkleLeaf(sector, bucket)
+	digest1 := leaf.Hash
 
-	digest1 := getNodeDigest(0, []int{1}, nil, nil, kvCopy, sectorsCopy)
-	digest2 := getNodeDigest(0, []int{1}, nil, nil, kvCopy, sectorsCopy)
-	if digest1 != digest2 {
-		t.Fatal("same sorted snapshot should produce the same leaf digest")
-	}
+	kv.installObjects("alpha", []rpc.Object{
+		makeTestObject("A1-updated", 11, "etag-a1-updated", map[string]uint64{"s1": 2}),
+	})
+	leaf2 := kv.MakeMerkleLeaf(sector, bucket)
+	digest2 := leaf2.Hash
 
-	changedKV, changedSectors := makeMerkleSnapshot()
-	changedKV["beta"][0].Value = "B1-updated"
-	changedKV["beta"][0].Context.ETag = "etag-b1-updated"
-
-	digest3 := getNodeDigest(0, []int{1}, nil, nil, changedKV, changedSectors)
-	if digest1 == digest3 {
-		t.Fatal("leaf digest should change when sector contents change")
+	if digest1 == digest2 {
+		t.Fatal("leaf digest should change when bucket contents change")
 	}
 }
 
 func TestGetNodeDigestInternalDependsOnChildHashes(t *testing.T) {
-	kvCopy, sectorsCopy := makeMerkleSnapshot()
+	kv := makeMerkleTestServer()
+	left := kv.MakeMerkleLeaf(0, 0)
+	right := kv.MakeMerkleLeaf(0, 1)
+	parent1 := kv.MakeMerkleInternalNode(left, right).Hash
 
-	left := &MerkleNode{
-		Level:   0,
-		Sectors: []int{1},
-		Hash:    getNodeDigest(0, []int{1}, nil, nil, kvCopy, sectorsCopy),
-	}
-	right := &MerkleNode{
-		Level:   0,
-		Sectors: []int{2},
-		Hash:    getNodeDigest(0, []int{2}, nil, nil, kvCopy, sectorsCopy),
-	}
-
-	parent1 := getNodeDigest(1, []int{1, 2}, left, right, kvCopy, sectorsCopy)
 	right.Hash[0] ^= 0xff
-	parent2 := getNodeDigest(1, []int{1, 2}, left, right, kvCopy, sectorsCopy)
+	parent2 := kv.MakeMerkleNode(1, left.Sector, -1, left, right).Hash
 
 	if parent1 == parent2 {
 		t.Fatal("internal node digest should change when a child hash changes")
 	}
 }
 
-func TestMakeMerkleNodeCopiesSectorsAndSetsParents(t *testing.T) {
-	kvCopy, sectorsCopy := makeMerkleSnapshot()
-	left := &MerkleNode{Level: 0, Sectors: []int{1}}
-	right := &MerkleNode{Level: 0, Sectors: []int{2}}
-	sectors := []int{1, 2}
+func TestMakeMerkleNodeSetsParents(t *testing.T) {
+	kv := makeMerkleTestServer()
+	left := kv.MakeMerkleLeaf(0, 0)
+	right := kv.MakeMerkleLeaf(0, 1)
+	node := kv.MakeMerkleInternalNode(left, right)
 
-	node := MakeMerkleNode(1, sectors, left, right, kvCopy, sectorsCopy)
-	sectors[0] = 99
-
-	if !reflect.DeepEqual(node.Sectors, []int{1, 2}) {
-		t.Fatalf("node should keep its own copy of sectors, got %v", node.Sectors)
-	}
 	if left.Parent != node {
 		t.Fatal("left child parent pointer was not set")
 	}
@@ -138,110 +129,65 @@ func TestMakeMerkleNodeCopiesSectorsAndSetsParents(t *testing.T) {
 	}
 }
 
-func TestMakeMerkleTreeSingleSectorReturnsLeafRoot(t *testing.T) {
-	kvCopy := map[string][]rpc.Object{
-		"alpha": {
-			makeTestObject("A1", 10, "etag-a1", map[string]uint64{"s1": 1}),
-		},
-	}
-	sectorsCopy := map[int][]string{
-		7: {"alpha"},
-	}
-
-	root := MakeMerkleTree(kvCopy, sectorsCopy)
-	wantHash := getNodeDigest(0, []int{7}, nil, nil, kvCopy, sectorsCopy)
+func TestBuildMerkleTreeUsesAllBuckets(t *testing.T) {
+	kv := makeMerkleTestServer()
+	root := kv.BuildMerkleTree(0)
+	summary := root.ToSummary()
+	wantNodes := 2*kv.ring.BucketsPerSector() - 1
 
 	if root == nil {
 		t.Fatal("expected non-nil root")
 	}
-	if !root.IsLeaf() {
-		t.Fatal("single-sector tree root should be a leaf")
+	if root.IsLeaf() {
+		t.Fatal("multi-bucket tree root should not be a leaf")
 	}
-	if !root.IsRoot() {
-		t.Fatal("single-sector tree root should report IsRoot")
-	}
-	if !reflect.DeepEqual(root.Sectors, []int{7}) {
-		t.Fatalf("unexpected root sectors: %v", root.Sectors)
-	}
-	if root.Hash != wantHash {
-		t.Fatal("single-sector root hash should match leaf digest")
+	if len(summary.Hashes) != wantNodes {
+		t.Fatalf("unexpected number of nodes in summary: got %d want %d", len(summary.Hashes), wantNodes)
 	}
 }
 
-func TestMakeMerkleTreeDeterministicAcrossSectorMapInsertionOrder(t *testing.T) {
-	kvCopy, _ := makeMerkleSnapshot()
+func TestBuildMerkleTreeDeterministicAcrossKeyOrderWithinBucket(t *testing.T) {
+	kv1 := makeMerkleTestServer()
+	kv2 := makeMerkleTestServer()
+	sector, bucket := kv1.ring.GetLocation("alpha")
 
-	sectorKeys1 := map[int][]string{
-		1: {"alpha", "beta"},
-		2: {"gamma"},
-	}
-	sectorKeys2 := map[int][]string{
-		2: {"gamma"},
-		1: {"alpha", "beta"},
-	}
+	kv1.mu.Lock()
+	kv1.keysInBuckets[sector][bucket] = []string{"alpha", "beta"}
+	kv1.mu.Unlock()
+	kv2.mu.Lock()
+	kv2.keysInBuckets[sector][bucket] = []string{"beta", "alpha"}
+	kv2.mu.Unlock()
 
-	root1 := MakeMerkleTree(kvCopy, sectorKeys1)
-	root2 := MakeMerkleTree(kvCopy, sectorKeys2)
+	root1 := kv1.BuildMerkleTree(sector)
+	root2 := kv2.BuildMerkleTree(sector)
 
-	if root1 == nil || root2 == nil {
-		t.Fatal("expected non-nil merkle roots")
-	}
 	if root1.Hash != root2.Hash {
-		t.Fatalf("expected deterministic root hash across sector map insertion order: %x != %x", root1.Hash, root2.Hash)
-	}
-	if !reflect.DeepEqual(root1.Sectors, root2.Sectors) {
-		t.Fatalf("expected same root sectors across insertion order: %v != %v", root1.Sectors, root2.Sectors)
+		t.Fatalf("expected deterministic root hash across key order: %x != %x", root1.Hash, root2.Hash)
 	}
 }
 
-func TestMakeMerkleTreeDeterministicAcrossKeyOrderWithinSector(t *testing.T) {
-	kvCopy, _ := makeMerkleSnapshot()
+func TestBuildMerkleTreeDeterministicAcrossObjectOrderWithinKey(t *testing.T) {
+	ring := chr.MakeConsistentHashRing(2, 4, 1, []string{"s1"})
+	kv1 := MakeKVServer("s1", ring, 1, 1, map[string]*labrpc.ClientEnd{})
+	kv2 := MakeKVServer("s1", ring, 1, 1, map[string]*labrpc.ClientEnd{})
 
-	sectorKeys1 := map[int][]string{
-		1: {"alpha", "beta"},
-		2: {"gamma"},
+	objects1 := []rpc.Object{
+		makeTestObject("B1", 20, "etag-b1", map[string]uint64{"s1": 1, "s2": 1}),
+		makeTestObject("B2", 30, "etag-b2", map[string]uint64{"s3": 1}),
 	}
-	sectorKeys2 := map[int][]string{
-		1: {"beta", "alpha"},
-		2: {"gamma"},
+	objects2 := []rpc.Object{
+		makeTestObject("B2", 30, "etag-b2", map[string]uint64{"s3": 1}),
+		makeTestObject("B1", 20, "etag-b1", map[string]uint64{"s1": 1, "s2": 1}),
 	}
 
-	root1 := MakeMerkleTree(kvCopy, sectorKeys1)
-	root2 := MakeMerkleTree(kvCopy, sectorKeys2)
+	kv1.installObjects("beta", objects1)
+	kv2.installObjects("beta", objects2)
 
-	if root1 == nil || root2 == nil {
-		t.Fatal("expected non-nil merkle roots")
-	}
+	sector, _ := kv1.ring.GetLocation("beta")
+	root1 := kv1.BuildMerkleTree(sector)
+	root2 := kv2.BuildMerkleTree(sector)
+
 	if root1.Hash != root2.Hash {
-		t.Fatalf("expected deterministic root hash across key order within sector: %x != %x", root1.Hash, root2.Hash)
-	}
-}
-
-func TestMakeMerkleTreeDeterministicAcrossObjectOrderWithinKey(t *testing.T) {
-	sectorKeys := map[int][]string{
-		1: {"beta"},
-	}
-
-	kv1 := map[string][]rpc.Object{
-		"beta": {
-			makeTestObject("B1", 20, "etag-b1", map[string]uint64{"s1": 1, "s2": 1}),
-			makeTestObject("B2", 30, "etag-b2", map[string]uint64{"s3": 1}),
-		},
-	}
-	kv2 := map[string][]rpc.Object{
-		"beta": {
-			makeTestObject("B2", 30, "etag-b2", map[string]uint64{"s3": 1}),
-			makeTestObject("B1", 20, "etag-b1", map[string]uint64{"s1": 1, "s2": 1}),
-		},
-	}
-
-	root1 := MakeMerkleTree(kv1, sectorKeys)
-	root2 := MakeMerkleTree(kv2, sectorKeys)
-
-	if root1 == nil || root2 == nil {
-		t.Fatal("expected non-nil merkle roots")
-	}
-	if root1.Hash != root2.Hash {
-		t.Fatalf("expected deterministic root hash across object order within key: %x != %x", root1.Hash, root2.Hash)
+		t.Fatalf("expected deterministic root hash across object order: %x != %x", root1.Hash, root2.Hash)
 	}
 }

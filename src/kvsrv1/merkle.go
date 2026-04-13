@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"hash"
-	"sort"
 	"slices"
 	"time"
 
@@ -86,7 +85,7 @@ func (kv *KVServer) MakeMerkleNode(level, sector, bucket int, left, right *Merkl
 		Parent: nil,
         Left: left,
         Right: right,
-		Hash: make([]byte,0, 32),
+		Hash: [32]byte{},
     }
 	node.Hash = node.GetNodeDigest(kv)
 	if left != nil {
@@ -127,15 +126,15 @@ func (node *MerkleNode) GetNodeDigest(kv *KVServer) [32]byte {
 		return finalizeHash(h)
 	}
 
-	if left == nil {
+	if node.Left == nil {
 		writeString(h, "empty")
 	} else {
-		writeBytes(h, left.Hash[:])
+		writeBytes(h, node.Left.Hash[:])
 	}
-	if right == nil {
+	if node.Right == nil {
 		writeString(h, "empty")
 	} else {
-		writeBytes(h, right.Hash[:])
+		writeBytes(h, node.Right.Hash[:])
 	}
 
 	return finalizeHash(h)
@@ -153,21 +152,17 @@ func (node *MerkleNode) IsInternal() bool {
     return node.Left != nil && node.Right != nil
 }
 
-// TODO: fix this after divide the sectors into smaller parts
+// Build one fixed leaf per bucket so every replica produces the same tree shape.
 func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
-	buckets := kv.GetBucketsFromSector(sector)
-
 	// build the leaves of the merkle tree
-	leaves := make([]*MerkleNode, 0, len(buckets))
-
-	for _, bucket := range buckets {
+	leaves := make([]*MerkleNode, 0, kv.ring.BucketsPerSector())
+	for bucket := 0; bucket < kv.ring.BucketsPerSector(); bucket++ {
 		leaves = append(leaves, kv.MakeMerkleLeaf(sector, bucket))
 	}
 
 	// build the internal nodes and root of the merkle tree
-	upperNodes := make([]*MerkleNode, 0, len(leaves)/2 + 1)
-	level := 1
 	for len(leaves) > 1 {
+		upperNodes := make([]*MerkleNode, 0, len(leaves)/2+1)
 		i := 0
 		for ; i + 1 < len(leaves); i += 2 {
 			left := leaves[i]
@@ -178,8 +173,6 @@ func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
 			upperNodes = append(upperNodes, kv.MakeMerkleInternalNode(leaves[i], nil))
 		}
 		leaves = upperNodes
-		upperNodes = make([]*MerkleNode, 0, len(leaves)/2 + 1)
-		level++
 	}
 
 	return leaves[0]
@@ -210,16 +203,19 @@ func (kv *KVServer) StartRefreshMerkleTrees(interval time.Duration) {
 func (kv *KVServer) refreshMerkleTrees() {
 	// rebuild the merkle tree
 	// TODO: jitter the rebuild time to avoid synchronization
-	for sector := range kv.sectorKeys {
+	for sector := 0; sector < kv.ring.NumSectors(); sector++ {
 		newRoot := kv.BuildMerkleTree(sector)
+		kv.mu.Lock()
 		kv.merkleRoots[sector] = newRoot
+		kv.mu.Unlock()
 	}
 }
 
-func (kv *KVServer) GetMerkleRoot(sector int) *MerkleNode {
+func (kv *KVServer) GetMerkleRoot(sector int) (*MerkleNode, bool) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	return kv.merkleRoots[sector]
+	root, ok := kv.merkleRoots[sector]
+	return root, ok
 }
 
 func (root *MerkleNode) ToSummary() rpc.TreeSummary {

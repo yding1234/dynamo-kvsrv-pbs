@@ -47,15 +47,12 @@ func (kv *KVServer) repairReplicas(key string, canonicalSiblings []rpc.Object, s
 }
 
 func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
 	if args.Delete {
-		delete(kv.kv, args.Key)
+		kv.installObjects(args.Key, nil)
 		reply.Err = rpc.OK
 		return
 	}
 
-	kv.kv[args.Key] = rpc.CopyObjects(args.Objects)
+	kv.installObjects(args.Key, args.Objects)
 	reply.Err = rpc.OK
 }

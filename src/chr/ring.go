@@ -3,7 +3,6 @@ package chr
 import (
 	"fmt"
 	"hash/crc32"
-	"math/bits"
 	"sync"
 )
 
@@ -96,8 +95,8 @@ func (chr *ConsistentHashRing) GetNeighbors(sectorID int) ([]string, []int) {
 	if target > chr.numServers {
 		target = chr.numServers
 	}
-	neighborNodes := make([]string, target)
-	neighborSectors := make([]int, target)
+	neighborNodes := make([]string, 0, target)
+	neighborSectors := make([]int, 0, target)
 	curNodeID := chr.sectorMap[sectorID]
 
 	for len(neighborNodes) < target {

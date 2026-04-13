@@ -15,11 +15,16 @@ func (kv *KVServer) StartAntiEntropy() {
 			select {
 				case <-ticker.C:
 					// choose a random sector from the sectors managed by the server
-					// TODO: choose a random sector from the sectors owned by the server, do we need to do this?
 					sectors := kv.GetResponsibleSectors()
+					if len(sectors) == 0 {
+						continue
+					}
 					randSector := sectors[rand.Intn(len(sectors))]
 					// choose a random neighbor sector of the sector, excluding the sector itself
 					_, neighborSectors := kv.ring.GetNeighbors(randSector)
+					if len(neighborSectors) <= 1 {
+						continue
+					}
 					randChosen := rand.Intn(len(neighborSectors)-1) + 1 // +1 because the sector itself is not a neighbor
 
 					kv.Reconcile(randSector, neighborSectors[randChosen])
@@ -33,22 +38,28 @@ func (kv *KVServer) StartAntiEntropy() {
 func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	// send anti-entropy request to the neighbor
 	neighborNode := kv.ring.GetNodeID(neighborSector)
-	summary := kv.GetMerkleRoot(sector).ToSummary()
+	root, ok := kv.GetMerkleRoot(sector)
+	if !ok || root == nil {
+		return
+	}
+	summary := root.ToSummary()
 	
 	repairGetDiffArgs := rpc.RepairGetDiffArgs{Sector: neighborSector, Summary: summary}
 	repairGetDiffReply := rpc.RepairGetDiffReply{}
 	
-	ok := kv.ends[neighborNode].Call("KVServer.RepairGetDiff", &repairGetDiffArgs, &repairGetDiffReply)
+	ok = kv.ends[neighborNode].Call("KVServer.RepairGetDiff", &repairGetDiffArgs, &repairGetDiffReply)
 	if !ok {
-		return
-	}
-	if repairGetDiffReply.Err == rpc.OK{
+		// network error
 		return
 	}
 	if repairGetDiffReply.Err == rpc.ErrNoHashValue {
 		// no hash value found -> no key is stored in the neighbor sector
 		// the reason can be disk failure, network failure, etc.
 		// we can't do anything about it for now, so we just return
+		return
+	}
+	if repairGetDiffReply.Err == rpc.OK && len(repairGetDiffReply.DiffKeyInfos) == 0 {
+		// no difference found
 		return
 	}
 
@@ -59,10 +70,9 @@ func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 
 func (kv *KVServer) RepairGetDiff(args *rpc.RepairGetDiffArgs, reply *rpc.RepairGetDiffReply) {
 	mySector := args.Sector
-	neighborSector := args.Summary.Sector
 	
 	myRoot, ok := kv.GetMerkleRoot(mySector)
-	if !ok {
+	if !ok || myRoot == nil {
 		reply.Err = rpc.ErrNoHashValue
 		return
 	}
@@ -72,57 +82,60 @@ func (kv *KVServer) RepairGetDiff(args *rpc.RepairGetDiffArgs, reply *rpc.Repair
 	}
 
 	// find the different leaves
-	diffLeaves := findDiffLeaves(myRoot.ToSummary(), args.Summary)
+	diffBuckets := findDiffBuckets(myRoot.ToSummary(), args.Summary)
 
 	// collect the difference key infos
-	for _, leaf := range diffLeaves {
-		keys := kv.GetKeysFromBucket(sector, leaf)
+	for _, bucket := range diffBuckets {
+		keys := kv.GetKeysFromBucket(mySector, bucket)
 		for _, key := range keys {
-			reply.DiffKeyInfos = append(reply.DiffKeyInfos, KeyInfo{
+			reply.DiffKeyInfos = append(reply.DiffKeyInfos, rpc.KeyInfo{
 				Key: key,
 				Objects: kv.GetSiblings(key),
 			})
 		}
 	}
+	reply.Err = rpc.OK
 }
 
-func findDiffLeaves(mySummary, neighborSummary rpc.TreeSummary) []int {
+func findDiffBuckets(mySummary, neighborSummary rpc.TreeSummary) []int {
 	myHashes := mySummary.Hashes
 	neighborHashes := neighborSummary.Hashes
 
-	diffLeaves := make([]int, 0)
-	// use BFS to find the difference paths
-	diffPaths := make([][]int, 0)
-	queue := [][]int{{0}}
+	diffBuckets := make([]int, 0)
+	// use BFS to find the different buckets
+	queue := []int{0}
 	for len(queue) > 0 {
-		currPath := queue[0]
-		currPos := currPath[len(currPath)-1]
+		currPos := queue[0]
+		queue = queue[1:]
 		
 		if myHashes[currPos] != neighborHashes[currPos] {
 			// since each sectors has same number of buckets, 
 			// we can directly check one merkle tree position to find if it's internal or leaf
 			// and there is no chance that one is internal and the other is leaf
-			if currPos < len(myHashes)/2{ // internal node
+			if currPos < len(myHashes)/2 { // internal node
 				// check the left child
-				if !IsEmptyHash(myHashes[currPos+1]) { // not empty hash value
-					diffPaths = append(diffPaths, append(currPath, currPos+1))
+				if !IsEmptyHash(myHashes[currPos*2+1]) { // not empty hash value
+					queue = append(queue, currPos*2+1)
 				}
 				// check the right child
-				if !IsEmptyHash(myHashes[currPos+2]) {
-					diffPaths = append(diffPaths, append(currPath, currPos+2))
+				if !IsEmptyHash(myHashes[currPos*2+2]) {
+					queue = append(queue, currPos*2+2)
 				}
 			} else { // leaf node
-				diffLeaves = append(diffLeaves, currPos) // found a different leaf
+				// convert leaf node position to bucket index
+				bucketIndex := currPos - len(myHashes)/2
+				diffBuckets = append(diffBuckets, bucketIndex) // found a different bucket
 			}
 		}
-		queue = queue[1:]
 	}
-	return diffLeaves
+	return diffBuckets
 }
 
 func (kv *KVServer) ApplyDiff(sector int, diffKeyInfos []rpc.KeyInfo, neighborNode string) {
 	// check validity of each key info by vclock
-	for key, siblings := range diffKeyInfos {
+	for _, keyInfo := range diffKeyInfos {
+		key := keyInfo.Key
+		siblings := keyInfo.Objects
 		mySiblings := kv.GetSiblings(key)
 		for _, sibling := range siblings {
 			if !sibling.CanBeAddedTo(mySiblings) {
@@ -130,10 +143,7 @@ func (kv *KVServer) ApplyDiff(sector int, diffKeyInfos []rpc.KeyInfo, neighborNo
 			}
 			mySiblings = rpc.AddObject(mySiblings, sibling, nil) 
 		}
-		// update the key in the current sector
-		kv.mu.Lock()
-		kv.kv[key] = mySiblings
-		kv.mu.Unlock()
+		kv.installObjects(key, mySiblings)
 
 		// send repair request to the neighbor node
 		kv.ends[neighborNode].Call("KVServer.RepairPut", 
