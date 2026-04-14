@@ -105,9 +105,9 @@ func TestCoordPutStoresHintForDeadReplica(t *testing.T) {
 		t.Fatalf("expected put to succeed with hinted handoff, got %v", reply.Err)
 	}
 
-	hints := servers[handoffHolder].CopyHints(deadReplica)
+	hints := servers[handoffHolder].GetHints(deadReplica)
 	if len(hints) != 1 {
-		t.Fatalf("expected 1 hinted write stored for %s, got %d", deadReplica, len(hints))
+		t.Fatalf("expected 1 hinted write stored for target %s, got %d", deadReplica, len(hints))
 	}
 	if hints[0].Key != key || hints[0].Object.Value != "value" {
 		t.Fatalf("unexpected hinted write: %+v", hints[0])
@@ -146,9 +146,9 @@ func TestHintedHandoffReplaysWhenTargetRecovers(t *testing.T) {
 	}
 
 	markMemberAlive(servers[handoffHolder], deadReplica)
-	servers[handoffHolder].replayHintsForTarget(deadReplica)
+	servers[handoffHolder].replayHints(deadReplica)
 
-	if hints := servers[handoffHolder].CopyHints(deadReplica); len(hints) != 0 {
+	if hints := servers[handoffHolder].GetHints(deadReplica); len(hints) != 0 {
 		t.Fatalf("expected hinted write to be removed after replay, got %d", len(hints))
 	}
 	if got := servers[deadReplica].GetSiblings(key); len(got) != 1 || got[0].Value != "value" {

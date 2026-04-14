@@ -60,7 +60,7 @@ type KVServer struct {
 	cleanupTimeout time.Duration // time to consider a node as dead
 
 	// hinted handoff
-	hints map[string][]HintedWrite // original target -> pending hinted writes
+	hints map[string][]rpc.PutArgs // original target -> pending put requests
 	hintedHandoffInterval time.Duration
 }
 
@@ -83,7 +83,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		gossipInterval: defaultGossipInterval,
 		failureTimeout: defaultFailureTimeout,
 		cleanupTimeout: defaultCleanupTimeout,
-		hints: make(map[string][]HintedWrite),
+		hints: make(map[string][]rpc.PutArgs),
 		hintedHandoffInterval: defaultHintedHandoffInterval,
 	}
 
@@ -138,7 +138,6 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	}
 
 	// forward the get request to the replicas
-
 	prefList := kv.filterDeadMembers(kv.ring.GetPreferenceList(args.Key))
 	if len(prefList) < kv.readQuorum {
 		reply.Err = rpc.ErrReadQuorumNotMet
@@ -200,8 +199,6 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 // the object should be placed based on the associated key, and writes the replicas to disk.
 // TODO: handle the case where the write quorum is not met
 func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Serialize coordinator writes so concurrent puts with the same expected
-	// version don't interleave across replicas and break linearizability.
 	kv.coordMu.Lock()
 	defer kv.coordMu.Unlock()
 
@@ -210,17 +207,16 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		reply.Err = rpc.ErrNotCoordinator
 		return
 	}
+	
+	// update the context with the new node and value
+	args.Object.Context.Update(kv.id, args.Object.Value)
 
-	// forward the put request to the replicas or hinted-handoff targets
+	// get put plans
 	prefList := kv.ring.GetPreferenceList(args.Key)
-
-	writeObject := args.Object
-	writeObject.Context = args.BaseContext
-	writeObject.Context.Update(kv.id, writeObject.Value)
 
 	type putPlan struct {
 		targetServer  string
-		handoffServer string
+		handoffServer string // "" means no handoff is needed
 	}
 
 	usedServers := make(map[string]bool, len(prefList))
@@ -229,54 +225,50 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 
 	plans := make([]putPlan, 0, len(prefList))
-	actionablePlans := 0
 	for _, serverID := range prefList {
+		// if the server is dead, choose a handoff node from the remaining servers
 		if kv.isDead(serverID) {
 			handoffServer, ok := kv.chooseHandoffNode(usedServers)
 			if ok {
 				usedServers[handoffServer] = true
 				plans = append(plans, putPlan{targetServer: serverID, handoffServer: handoffServer})
-				actionablePlans++
 			}
 			continue
 		}
 		plans = append(plans, putPlan{targetServer: serverID})
-		actionablePlans++
 	}
 
-	if actionablePlans < kv.writeQuorum {
+	if len(plans) < kv.writeQuorum {
 		reply.Err = rpc.ErrWriteQuorumNotMet
 		return
 	}
-
-	ch := make(chan rpc.ForwardPutResult, actionablePlans)
+	
+	// forward the put request to the replicas or hinted-handoff targets according to the plans
+	ch := make(chan rpc.ForwardPutResult, len(plans))
 	for _, plan := range plans {
 		go func(plan putPlan) {
 			if plan.handoffServer != "" {
-				hintedArgs := rpc.HintedPutArgs{
-					TargetServer: plan.targetServer,
-					Key:          args.Key,
-					Object:       writeObject,
-					BaseContext:  args.BaseContext.Copy(),
-				}
+				// send the put request to the handoff server
+				hintedArgs := rpc.HintedPutArgs{TargetServer: plan.targetServer, PutArgs: args.Copy()}
 				hintedReply := rpc.HintedPutReply{}
+
 				ok := kv.ends[plan.handoffServer].Call("KVServer.HintedPut", &hintedArgs, &hintedReply)
+				if !ok {
+					ch <- rpc.ForwardPutResult{OK: false}
+				} else {
+					ch <- rpc.ForwardPutResult{OK: true, Err: hintedReply.Err}
+				}
+			} else {
+				// send the put request to the target server
+				forwardArgs := args.Copy()
+				forwardReply := rpc.PutReply{}
+				ok := kv.ends[plan.targetServer].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
 				if !ok {
 					ch <- rpc.ForwardPutResult{OK: false}
 					return
 				}
-				ch <- rpc.ForwardPutResult{OK: true, Err: hintedReply.Err}
-				return
+				ch <- rpc.ForwardPutResult{OK: true, Err: forwardReply.Err}
 			}
-
-			forwardArgs := rpc.PutArgs{Key: args.Key, Object: writeObject, BaseContext: args.BaseContext}
-			forwardReply := rpc.PutReply{}
-			ok := kv.ends[plan.targetServer].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
-			if !ok {
-				ch <- rpc.ForwardPutResult{OK: false}
-				return
-			}
-			ch <- rpc.ForwardPutResult{OK: true, Err: forwardReply.Err}
 		}(plan)
 	}
 
@@ -284,7 +276,7 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	successCount := 0
 	versionErrCount := 0
 	noKeyCount := 0
-	for i := 0; i < actionablePlans; i++ {
+	for i := 0; i < len(plans); i++ {
 		res := <-ch
 		if !res.OK {
 			continue
@@ -343,6 +335,7 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		return
 	}
 
+	// if the object cannot be added to the siblings, return ErrVersion
 	baseObject := rpc.Object{Value: args.Object.Value, Context: args.BaseContext}
 	canAdd := baseObject.CanBeAddedTo(siblings)
 	if !canAdd {
@@ -350,9 +343,10 @@ func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		return
 	}
 	// otherwise, install the siblings
+	// TODO: check if need change to install func
 	kv.kv[args.Key] = rpc.AddObject(siblings, args.Object, nil) // nil means no specify sort function
 
-	// If this is the first version for the key, add it to the bucket index too.
+	// if this is the first version for the key, add it to the bucket index too
 	if args.BaseContext.IsInitial() {
 		sector, bucket := kv.ring.GetLocation(args.Key)
 		kv.keysInBuckets[sector][bucket] = appendUniqueKey(kv.keysInBuckets[sector][bucket], args.Key)

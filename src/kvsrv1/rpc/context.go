@@ -53,6 +53,7 @@ func (ctx Context) IsEqual(other Context) bool {
 	return ctx.Compare(other) == vclock.Equal && ctx.Timestamp == other.Timestamp && ctx.ETag == other.ETag
 }
 
+// update the context with the new node and value
 func (ctx *Context) Update(node string, value string) {
 	ctx.VC = ctx.VC.Copy()
 	ctx.VC.Increment(node)

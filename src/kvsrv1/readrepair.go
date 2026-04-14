@@ -2,6 +2,17 @@ package kvsrv
 
 import "6.5840/kvsrv1/rpc"
 
+func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
+	if args.Delete {
+		kv.installObjects(args.Key, nil)
+		reply.Err = rpc.OK
+		return
+	}
+
+	kv.installObjects(args.Key, args.Objects)
+	reply.Err = rpc.OK
+}
+
 func findStaleReplicas(canonicalSiblings []rpc.Object, results []rpc.ForwardGetResult) []string {
 	staleReplicas := make([]string, 0)
 
@@ -44,15 +55,4 @@ func (kv *KVServer) repairReplicas(key string, canonicalSiblings []rpc.Object, s
 		go kv.ends[staleReplica].Call("KVServer.RepairPut", 
 			&rpc.RepairArgs{Key: key, Objects: canonicalSiblings}, &rpc.RepairReply{})
 	}
-}
-
-func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
-	if args.Delete {
-		kv.installObjects(args.Key, nil)
-		reply.Err = rpc.OK
-		return
-	}
-
-	kv.installObjects(args.Key, args.Objects)
-	reply.Err = rpc.OK
 }

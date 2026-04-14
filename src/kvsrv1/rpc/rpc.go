@@ -32,6 +32,14 @@ type PutArgs struct {
 	BaseContext Context // the context of the original request
 }
 
+func (args PutArgs) Copy() PutArgs {
+	return PutArgs{
+		Key:     args.Key,
+		Object:  args.Object,
+		BaseContext: args.BaseContext.Copy(),
+	}
+}
+
 type PutReply struct {
 	Err Err
 }
@@ -54,17 +62,6 @@ type ForwardGetResult struct {
 
 type ForwardPutResult struct {
 	OK  bool
-	Err Err
-}
-
-type HintedPutArgs struct {
-	TargetServer string
-	Key          string
-	Object       Object
-	BaseContext  Context
-}
-
-type HintedPutReply struct {
 	Err Err
 }
 
@@ -108,4 +105,14 @@ type SyncMembersArgs struct {
 
 type SyncMembersReply struct {
 	MemberInfos []MemberInfo
+}
+
+// for hinted handoff
+type HintedPutArgs struct {
+	TargetServer string
+	PutArgs PutArgs
+}
+
+type HintedPutReply struct {
+	Err Err
 }
