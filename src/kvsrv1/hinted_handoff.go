@@ -47,13 +47,13 @@ func (kv *KVServer) replayHints(target string) {
 
 	hints := kv.GetHints(target)
 
-	// resent pending put requests to the target server
-	for i, hint := range hints {
+	// resend pending put requests to the target server
+	for _, hint := range hints {
 		args := hint
 		reply := rpc.PutReply{}
 		ok := kv.ends[target].Call("KVServer.ReplicaPut", &args, &reply)
 		if ok && reply.Err == rpc.OK {
-			kv.removeHint(target, i)
+			kv.removeHint(target, hint)
 		}
 	}
 }
@@ -94,15 +94,23 @@ func (kv *KVServer) isDead(serverID string) bool {
 }
 
 
-// remove the putArgs at the given index for the given target server
-func (kv *KVServer) removeHint(target string, index int) {
+// remove one matching hinted put for the given target server
+func (kv *KVServer) removeHint(target string, matched rpc.PutArgs) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
 	hints := kv.hints[target]
-	kv.hints[target] = append(hints[:index], hints[index+1:]...)
-	if len(kv.hints[target]) == 0 {
-		delete(kv.hints, target)
+	for i, hint := range hints {
+		if hint.Key == matched.Key &&
+			hint.Object.Value == matched.Object.Value &&
+			hint.Object.Context.IsEqual(matched.Object.Context) &&
+			hint.BaseContext.IsEqual(matched.BaseContext) {
+			kv.hints[target] = append(hints[:i], hints[i+1:]...)
+			if len(kv.hints[target]) == 0 {
+				delete(kv.hints, target)
+			}
+			return
+		}
 	}
 }
 
