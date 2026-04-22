@@ -173,14 +173,9 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 			}
 			if successCount >= kv.readQuorum {
 				canonicalSiblings := rpc.CopyObjects(siblings)
-				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
+				collectedResults := slice.Copy(results)
 				remaining := len(prefList) - len(results)
-				key := args.Key
-
-				// Continue collecting replies in the background so read repair can
-				// still compare against the full preference list after the client
-				// has already received its quorum response.
-				go kv.finishCoordGetReadRepair(key, canonicalSiblings, collectedResults, ch, remaining)
+				go kv.finishCoordGetReadRepair(args.Key, canonicalSiblings, collectedResults, ch, remaining)
 
 				reply.Objects = rpc.CopyObjects(siblings)
 				reply.Err = rpc.OK
@@ -189,7 +184,9 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		} else if res.Reply.Err == rpc.ErrNoKey {
 			noKeyCount++
 			if noKeyCount >= kv.readQuorum {
-				go drainForwardGetResults(ch, len(prefList)-len(results))
+				collectedResults := slice.Copy(results)
+				remaining := len(prefList) - len(results)
+				go kv.finishCoordGetReadRepair(args.Key, nil, collectedResults, ch, remaining)
 				reply.Err = rpc.ErrNoKey
 				return
 			}
@@ -313,7 +310,23 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 func (kv *KVServer) finishCoordGetReadRepair(key string, canonicalSiblings []rpc.Object,
 	results []rpc.ForwardGetResult, ch <-chan rpc.ForwardGetResult, remaining int) {
 	for i := 0; i < remaining; i++ {
-		results = append(results, <-ch)
+		res := <-ch
+		results = append(results, res)
+		if !res.OK {
+			continue
+		}
+		if res.Reply.Err == rpc.OK {
+			for _, obj := range res.Reply.Objects {
+				if obj.CanBeAddedTo(canonicalSiblings) {
+					canonicalSiblings = rpc.AddObject(canonicalSiblings, obj, nil)
+				}
+			}
+		}
+	}
+
+	hasCanonical := len(canonicalSiblings) > 0
+	if !hasCanonical {
+		return
 	}
 
 	staleReplicas := findStaleReplicas(canonicalSiblings, results)
