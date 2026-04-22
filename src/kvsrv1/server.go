@@ -31,8 +31,8 @@ type KVServer struct {
 	mu      sync.Mutex
 	coordMu sync.Mutex
 
-	id       string
-	kv       map[string][]rpc.Object // key -> list of objects
+	id string
+	kv map[string][]rpc.Object // key -> list of objects
 
 	// consistent hashing
 	ring        *chr.ConsistentHashRing
@@ -44,46 +44,46 @@ type KVServer struct {
 
 	// anti-entropy
 	// merkleRoots map[int]rpc.TreeSummary // sector ID -> merkle tree summary
-	merkleRoots map[int]*MerkleNode // sector ID -> merkle root
-	keysInBuckets [][][]string // sector ID -> bucket ID -> keys
+	merkleRoots         map[int]*MerkleNode // sector ID -> merkle root
+	keysInBuckets       [][][]string        // sector ID -> bucket ID -> keys
 	antiEntropyInterval time.Duration
-	stopCh chan struct{}
+	stopCh              chan struct{}
 
 	// membership
-	members map[string]rpc.MemberInfo // server ID -> member info
+	members           map[string]rpc.MemberInfo // server ID -> member info
 	memberLastUpdated map[string]time.Time
-	numNeighbors int // number of neighbors to gossip with
-	heartbeatCounter uint64 // heartbeat counter
-	heartbeatTimeout time.Duration
-	gossipInterval time.Duration
-	failureTimeout time.Duration // time to consider a node as suspect
-	cleanupTimeout time.Duration // time to consider a node as dead
+	numNeighbors      int    // number of neighbors to gossip with
+	heartbeatCounter  uint64 // heartbeat counter
+	heartbeatTimeout  time.Duration
+	gossipInterval    time.Duration
+	failureTimeout    time.Duration // time to consider a node as suspect
+	cleanupTimeout    time.Duration // time to consider a node as dead
 
 	// hinted handoff
-	hints map[string][]rpc.PutArgs // original target -> pending put requests
+	hints                 map[string][]rpc.PutArgs // original target -> pending put requests
 	hintedHandoffInterval time.Duration
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	writeQuorum int, readQuorum int, ends map[string]*labrpc.ClientEnd) *KVServer {
 	kv := &KVServer{id: serverID,
-		kv:          make(map[string][]rpc.Object),
-		ring:        ring,
-		writeQuorum: writeQuorum,
-		readQuorum:  readQuorum,
-		ends:        ends,
-		merkleRoots: make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
-		keysInBuckets: make([][][]string, ring.NumSectors()),
-		antiEntropyInterval: defaultAntiEntropyInterval,
-		stopCh: make(chan struct{}),
-		members: make(map[string]rpc.MemberInfo, len(ends)),
-		memberLastUpdated: make(map[string]time.Time, len(ends)),
-		numNeighbors: 2,
-		heartbeatTimeout: defaultHeartbeatTimeout,
-		gossipInterval: defaultGossipInterval,
-		failureTimeout: defaultFailureTimeout,
-		cleanupTimeout: defaultCleanupTimeout,
-		hints: make(map[string][]rpc.PutArgs),
+		kv:                    make(map[string][]rpc.Object),
+		ring:                  ring,
+		writeQuorum:           writeQuorum,
+		readQuorum:            readQuorum,
+		ends:                  ends,
+		merkleRoots:           make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
+		keysInBuckets:         make([][][]string, ring.NumSectors()),
+		antiEntropyInterval:   defaultAntiEntropyInterval,
+		stopCh:                make(chan struct{}),
+		members:               make(map[string]rpc.MemberInfo, len(ends)),
+		memberLastUpdated:     make(map[string]time.Time, len(ends)),
+		numNeighbors:          2,
+		heartbeatTimeout:      defaultHeartbeatTimeout,
+		gossipInterval:        defaultGossipInterval,
+		failureTimeout:        defaultFailureTimeout,
+		cleanupTimeout:        defaultCleanupTimeout,
+		hints:                 make(map[string][]rpc.PutArgs),
 		hintedHandoffInterval: defaultHintedHandoffInterval,
 	}
 
@@ -99,17 +99,17 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	now := time.Now()
 	for nodeID := range ends {
 		kv.members[nodeID] = rpc.MemberInfo{
-			ServerID: nodeID,
+			ServerID:  nodeID,
 			Heartbeat: 0,
-			Status: rpc.Alive,
+			Status:    rpc.Alive,
 		}
 		kv.memberLastUpdated[nodeID] = now
 	}
 	if _, ok := kv.members[serverID]; !ok {
 		kv.members[serverID] = rpc.MemberInfo{
-			ServerID: serverID,
+			ServerID:  serverID,
 			Heartbeat: 0,
-			Status: rpc.Alive,
+			Status:    rpc.Alive,
 		}
 		kv.memberLastUpdated[serverID] = now
 	}
@@ -125,7 +125,6 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 //
 // The context encodes system metadata about the object that is opaque to the caller
 // and includes information such as the version of the object.
-// TODO: sort the final reply by vector clock (a list of (node, counter) pairs)
 // TODO: handle the case where the read quorum is not met
 func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	kv.coordMu.Lock()
@@ -157,40 +156,47 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	successCount := 0
 	noKeyCount := 0
 	siblings := make([]rpc.Object, 0)
-	results := make([]rpc.ForwardGetResult, len(prefList))
+	results := make([]rpc.ForwardGetResult, 0, len(prefList))
 
-	for i := 0; i < len(prefList); i++ {
-		results[i] = <-ch
-		if !results[i].OK {
+	for len(results) < len(prefList) {
+		res := <-ch
+		results = append(results, res)
+		if !res.OK {
 			continue
 		}
-		if results[i].Reply.Err == rpc.OK {
+		if res.Reply.Err == rpc.OK {
 			successCount++
-			for _, obj := range results[i].Reply.Objects {
+			for _, obj := range res.Reply.Objects {
 				if obj.CanBeAddedTo(siblings) {
 					siblings = rpc.AddObject(siblings, obj, nil) // nil means no specify sort function
 				}
 			}
-		} else if results[i].Reply.Err == rpc.ErrNoKey {
+			if successCount >= kv.readQuorum {
+				canonicalSiblings := rpc.CopyObjects(siblings)
+				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
+				remaining := len(prefList) - len(results)
+				key := args.Key
+
+				// Continue collecting replies in the background so read repair can
+				// still compare against the full preference list after the client
+				// has already received its quorum response.
+				go kv.finishCoordGetReadRepair(key, canonicalSiblings, collectedResults, ch, remaining)
+
+				reply.Objects = rpc.CopyObjects(siblings)
+				reply.Err = rpc.OK
+				return
+			}
+		} else if res.Reply.Err == rpc.ErrNoKey {
 			noKeyCount++
+			if noKeyCount >= kv.readQuorum {
+				go drainForwardGetResults(ch, len(prefList)-len(results))
+				reply.Err = rpc.ErrNoKey
+				return
+			}
 		}
 	}
 
-	if successCount >= kv.readQuorum {
-		// read repair
-		canonicalSiblings := rpc.CopyObjects(siblings)
-		staleReplicas := findStaleReplicas(canonicalSiblings, results)
-		key := args.Key
-		go kv.repairReplicas(key, canonicalSiblings, staleReplicas)
-
-		// return the siblings
-		reply.Objects = siblings
-		reply.Err = rpc.OK
-	} else if noKeyCount >= kv.readQuorum {
-		reply.Err = rpc.ErrNoKey
-	} else {
-		reply.Err = rpc.ErrReadQuorumNotMet
-	}
+	reply.Err = rpc.ErrReadQuorumNotMet
 }
 
 // Write operation
@@ -207,7 +213,7 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		reply.Err = rpc.ErrNotCoordinator
 		return
 	}
-	
+
 	// update the context with the new node and value
 	args.Object.Context.Update(kv.id, args.Object.Value)
 
@@ -242,7 +248,7 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		reply.Err = rpc.ErrWriteQuorumNotMet
 		return
 	}
-	
+
 	// forward the put request to the replicas or hinted-handoff targets according to the plans
 	ch := make(chan rpc.ForwardPutResult, len(plans))
 	for _, plan := range plans {
@@ -284,7 +290,8 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		if res.Err == rpc.OK {
 			successCount++
 			if successCount >= kv.writeQuorum {
-				reply.Err = rpc.OK
+				go drainForwardPutResults(ch, len(plans)-i-1)
+				reply.Err = rpc.OK // reply OK immediately when the W quorum is met
 				return
 			}
 		} else if res.Err == rpc.ErrVersion {
@@ -303,6 +310,28 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 }
 
+func (kv *KVServer) finishCoordGetReadRepair(key string, canonicalSiblings []rpc.Object,
+	results []rpc.ForwardGetResult, ch <-chan rpc.ForwardGetResult, remaining int) {
+	for i := 0; i < remaining; i++ {
+		results = append(results, <-ch)
+	}
+
+	staleReplicas := findStaleReplicas(canonicalSiblings, results)
+	kv.repairReplicas(key, canonicalSiblings, staleReplicas)
+}
+
+func drainForwardGetResults(ch <-chan rpc.ForwardGetResult, remaining int) {
+	for i := 0; i < remaining; i++ {
+		<-ch
+	}
+}
+
+func drainForwardPutResults(ch <-chan rpc.ForwardPutResult, remaining int) {
+	for i := 0; i < remaining; i++ {
+		<-ch
+	}
+}
+
 // Get returns the value and context for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -318,7 +347,6 @@ func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	reply.Err = rpc.OK
 	return
 }
-
 
 // Update the value for a key if args.Context matches the context of
 // the key on the server. If versions don't match, return ErrVersion.
@@ -380,29 +408,29 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 }
 
 func (kv *KVServer) CopyKV() map[string][]rpc.Object {
-    kv.mu.Lock()
+	kv.mu.Lock()
 
-    kvCopy := make(map[string][]rpc.Object, len(kv.kv))
-    for k, objs := range kv.kv {
-        kvCopy[k] = rpc.CopyObjects(objs)
-    }
+	kvCopy := make(map[string][]rpc.Object, len(kv.kv))
+	for k, objs := range kv.kv {
+		kvCopy[k] = rpc.CopyObjects(objs)
+	}
 
-    kv.mu.Unlock()
+	kv.mu.Unlock()
 	return kvCopy
 }
 
 func (kv *KVServer) CopySectorKeys() map[int][]string {
-    kv.mu.Lock()
+	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-    sectorKeysCopy := make(map[int][]string, len(kv.keysInBuckets))
-    for sectorID, buckets := range kv.keysInBuckets {
-        keys := make([]string, 0)
-        for _, bucketKeys := range buckets {
-            keys = append(keys, bucketKeys...)
-        }
-        sectorKeysCopy[sectorID] = keys
-    }
+	sectorKeysCopy := make(map[int][]string, len(kv.keysInBuckets))
+	for sectorID, buckets := range kv.keysInBuckets {
+		keys := make([]string, 0)
+		for _, bucketKeys := range buckets {
+			keys = append(keys, bucketKeys...)
+		}
+		sectorKeysCopy[sectorID] = keys
+	}
 
 	return sectorKeysCopy
 }
