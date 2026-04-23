@@ -28,6 +28,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+func traceTime(ts int64) time.Time {
+	if ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ts)
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	coordMu sync.Mutex
@@ -160,8 +167,8 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 			receivedAt := time.Now()
 
 			if ok && kv.collector != nil {
-				arrivedAt := forwardReply.ArrivedAt
-				respondedAt := forwardReply.RespondedAt
+				arrivedAt := traceTime(forwardReply.ArrivedAt)
+				respondedAt := traceTime(forwardReply.RespondedAt)
 				_ = kv.collector.ObserveReadLatency(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
 			}
 
@@ -297,8 +304,8 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 					return
 				}
 				if kv.collector != nil {
-					arrivedAt := forwardReply.ArrivedAt
-					respondedAt := forwardReply.RespondedAt
+					arrivedAt := traceTime(forwardReply.ArrivedAt)
+					respondedAt := traceTime(forwardReply.RespondedAt)
 					_ = kv.collector.ObserveWriteLatency(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
 				}
 
@@ -383,9 +390,9 @@ func drainForwardPutResults(ch <-chan rpc.ForwardPutResult, remaining int) {
 // Get returns the value and context for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
-	reply.ArrivedAt = time.Now()
+	reply.ArrivedAt = time.Now().UnixNano()
 	defer func() {
-		reply.RespondedAt = time.Now()
+		reply.RespondedAt = time.Now().UnixNano()
 	}()
 
 	kv.mu.Lock()
@@ -406,9 +413,9 @@ func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 // If the key doesn't exist, Put installs the value if the
 // args.Context is zero, and returns ErrNoKey otherwise.
 func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
-	reply.ArrivedAt = time.Now()
+	reply.ArrivedAt = time.Now().UnixNano()
 	defer func() {
-		reply.RespondedAt = time.Now()
+		reply.RespondedAt = time.Now().UnixNano()
 	}()
 
 	kv.mu.Lock()
