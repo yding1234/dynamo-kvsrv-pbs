@@ -227,13 +227,35 @@ func (c *PBSCollector) ObserveReadLatency(m MessageTrace) error {
 func (c *PBSCollector) ObserveCompletedWrite(w CompletedWrite) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.writes = append(c.writes, w)
+
+	// insert the write into the writes list by committed time
+	insertIndex := len(c.writes)
+	for i := range c.writes {
+		if c.writes[i].CommittedAt.After(w.CommittedAt) {
+			insertIndex = i
+			break
+		}
+	}
+	c.writes = append(c.writes, CompletedWrite{})
+	copy(c.writes[insertIndex+1:], c.writes[insertIndex:])
+	c.writes[insertIndex] = w
 }
 
 func (c *PBSCollector) ObserveCompletedRead(r CompletedRead) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.reads = append(c.reads, r)
+
+	// insert the read into the reads list by returned time
+	insertIndex := len(c.reads)
+	for i := range c.reads {
+		if c.reads[i].ReturnedAt.After(r.ReturnedAt) {
+			insertIndex = i
+			break
+		}
+	}
+	c.reads = append(c.reads, CompletedRead{})
+	copy(c.reads[insertIndex+1:], c.reads[insertIndex:])
+	c.reads[insertIndex] = r
 }
 
 func (c *PBSCollector) Writes() []CompletedWrite {

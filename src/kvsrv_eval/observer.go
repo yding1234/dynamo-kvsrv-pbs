@@ -59,27 +59,36 @@ func ObserveKPSweep(collector *PBSCollector, ks []int) []float64 {
 func isDeltaRegular(read CompletedRead, writes []CompletedWrite, delta time.Duration) bool {
 	latestWriteBeforeDelta :=  NewCompletedWrite(read.Key, time.Time{}, time.Time{}, rpc.Object{})
 
-	for i, write := range writes {
+	for _, write := range writes {
 		if write.Key != read.Key {
 			continue
 		}
-		if !write.CommittedAt.Before(read.ReturnedAt) {
-			break
+
+		if overlaps(read, write) {
+			if IsConsistent(write.Object, read.ReturnedObjects) {
+				return true
+			}
+			continue
+		}
+
+		if write.CommittedAt.After(read.StartedAt) && !write.StartedAt.Before(read.ReturnedAt) {
+			continue
 		}
 
 		if write.CommittedAt.Before(read.StartedAt.Sub(delta)) {
 			if write.CommittedAt.After(latestWriteBeforeDelta.CommittedAt) {
 				latestWriteBeforeDelta = write
 			}
+			continue
 		}
 
-		// write is after read start - delta and before read is completed
 		if IsConsistent(write.Object, read.ReturnedObjects) {
 			return true
 		}
 	}
 
-	// no write is committed after read start - delta and before read completion
+	// If the read did not return a completed write from the delta window, it may
+	// still legally return the latest write that was visible exactly delta ago.
 	if IsConsistent(latestWriteBeforeDelta.Object, read.ReturnedObjects) {
 		return true
 	}
@@ -90,17 +99,18 @@ func isDeltaRegular(read CompletedRead, writes []CompletedWrite, delta time.Dura
 func isKRegular(read CompletedRead, writes []CompletedWrite, k int) bool {
 	kCandidate := make([]CompletedWrite, 0, k) // the k latest writes before read start
 	overlapped := make([]CompletedWrite, 0, 0) // the overlapped writes between read start and read completion
-	
+
 	for _, write := range writes {
 		if write.Key != read.Key {
 			continue
 		}
 
-		if !write.CommittedAt.Before(read.ReturnedAt) {
-			break
+		if overlaps(read, write) {
+			overlapped = append(overlapped, write)
+			continue
 		}
 
-		if write.CommittedAt.Before(read.StartedAt) {
+		if !write.CommittedAt.After(read.StartedAt) {
 			if len(kCandidate) < k {
 				kCandidate = append(kCandidate, write)
 			} else {
@@ -113,8 +123,6 @@ func isKRegular(read CompletedRead, writes []CompletedWrite, k int) bool {
 				}
 				kCandidate[stalest] = write
 			}
-		} else if write.CommittedAt.Before(read.ReturnedAt) {
-				overlapped = append(overlapped, write)
 		}
 	}
 
@@ -136,7 +144,7 @@ func isKRegular(read CompletedRead, writes []CompletedWrite, k int) bool {
 func IsConsistent(writeObj rpc.Object, readObjs []rpc.Object) bool {
 	for _, readObj := range readObjs {
 		cmp := writeObj.Context.Compare(readObj.Context)
-		if cmp == vclock.Equal || (cmp == vclock.Before && writeObj.Context.Timestamp <= readObj.Context.Timestamp) {
+		if cmp == vclock.Equal || cmp == vclock.Before {
 			return true
 		}
 		if cmp == vclock.After {
@@ -144,4 +152,8 @@ func IsConsistent(writeObj rpc.Object, readObjs []rpc.Object) bool {
 		}
 	}
 	return false
+}
+
+func overlaps(read CompletedRead, write CompletedWrite) bool {
+	return write.StartedAt.Before(read.ReturnedAt) && write.CommittedAt.After(read.StartedAt)
 }
