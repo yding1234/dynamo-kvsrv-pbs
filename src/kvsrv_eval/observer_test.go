@@ -1,0 +1,87 @@
+package kvsrv_eval
+
+import (
+	"testing"
+	"time"
+
+	"6.5840/kvsrv1/rpc"
+	"6.5840/vclock"
+)
+
+func makeObservedObject(value string, timestamp uint64, versions map[string]uint64) rpc.Object {
+	vc := vclock.NewVClock()
+	for node, version := range versions {
+		vc.SetVersion(node, version)
+	}
+	return rpc.Object{
+		Value: value,
+		Context: rpc.Context{
+			VC:        vc,
+			Timestamp: timestamp,
+			ETag:      value,
+		},
+	}
+}
+
+func TestIsConsistentIgnoresOlderSiblingIfNewerSiblingMatches(t *testing.T) {
+	target := makeObservedObject("v1", 10, map[string]uint64{"writer": 1})
+	older := makeObservedObject("v0", 5, map[string]uint64{})
+	newer := makeObservedObject("v2", 20, map[string]uint64{"writer": 2})
+
+	if !IsConsistent(target, []rpc.Object{older, newer}) {
+		t.Fatalf("expected consistency when any returned sibling is newer")
+	}
+}
+
+func TestObserveDeltaPCountsEachReadOnce(t *testing.T) {
+	collector := NewPBSCollector()
+	base := time.Unix(1000, 0)
+
+	oldWrite := NewCompletedWrite("k", base.Add(-20*time.Millisecond), base.Add(-20*time.Millisecond), makeObservedObject("v1", 10, map[string]uint64{"writer": 1}))
+	overlapWrite := NewCompletedWrite("k", base.Add(-5*time.Millisecond), base.Add(5*time.Millisecond), makeObservedObject("v2", 20, map[string]uint64{"writer": 2}))
+	read := NewCompletedRead("k", base, base.Add(1*time.Millisecond), []rpc.Object{
+		makeObservedObject("v2", 20, map[string]uint64{"writer": 2}),
+	})
+
+	collector.ObserveCompletedWrite(oldWrite)
+	collector.ObserveCompletedWrite(overlapWrite)
+	collector.ObserveCompletedRead(read)
+
+	if got := ObserveDeltaP(collector, 10*time.Millisecond); got != 1.0 {
+		t.Fatalf("expected one read to count once, got probability %v", got)
+	}
+}
+
+func TestObserveKPUsesLatestKCompletedWrites(t *testing.T) {
+	collector := NewPBSCollector()
+	base := time.Unix(2000, 0)
+
+	collector.ObserveCompletedWrite(NewCompletedWrite("k", base.Add(-30*time.Millisecond), base.Add(-30*time.Millisecond), makeObservedObject("v1", 10, map[string]uint64{"writer": 1})))
+	collector.ObserveCompletedWrite(NewCompletedWrite("k", base.Add(-20*time.Millisecond), base.Add(-20*time.Millisecond), makeObservedObject("v2", 20, map[string]uint64{"writer": 2})))
+	collector.ObserveCompletedWrite(NewCompletedWrite("k", base.Add(-10*time.Millisecond), base.Add(-10*time.Millisecond), makeObservedObject("v3", 30, map[string]uint64{"writer": 3})))
+	collector.ObserveCompletedRead(NewCompletedRead("k", base, base.Add(1*time.Millisecond), []rpc.Object{
+		makeObservedObject("v2", 20, map[string]uint64{"writer": 2}),
+	}))
+
+	if got := ObserveKP(collector, 1); got != 0.0 {
+		t.Fatalf("expected K=1 to reject returning the second-latest completed write, got %v", got)
+	}
+	if got := ObserveKP(collector, 2); got != 1.0 {
+		t.Fatalf("expected K=2 to accept returning one of the latest two completed writes, got %v", got)
+	}
+}
+
+func TestObserveKPAcceptsOverlappingWrite(t *testing.T) {
+	collector := NewPBSCollector()
+	base := time.Unix(3000, 0)
+
+	collector.ObserveCompletedWrite(NewCompletedWrite("k", base.Add(-20*time.Millisecond), base.Add(-20*time.Millisecond), makeObservedObject("v1", 10, map[string]uint64{"writer": 1})))
+	collector.ObserveCompletedWrite(NewCompletedWrite("k", base.Add(-5*time.Millisecond), base.Add(5*time.Millisecond), makeObservedObject("v2", 20, map[string]uint64{"writer": 2})))
+	collector.ObserveCompletedRead(NewCompletedRead("k", base, base.Add(1*time.Millisecond), []rpc.Object{
+		makeObservedObject("v2", 20, map[string]uint64{"writer": 2}),
+	}))
+
+	if got := ObserveKP(collector, 1); got != 1.0 {
+		t.Fatalf("expected overlapping write to satisfy K-regular semantics, got %v", got)
+	}
+}

@@ -65,7 +65,7 @@ type KVServer struct {
 	hintedHandoffInterval time.Duration
 
 	// tracing
-	tracer *kvsrv_eval.Tracer
+	collector *kvsrv_eval.PBSCollector
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
@@ -89,7 +89,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		cleanupTimeout:        defaultCleanupTimeout,
 		hints:                 make(map[string][]rpc.PutArgs),
 		hintedHandoffInterval: defaultHintedHandoffInterval,
-		tracer:                kvsrv_eval.NewTracer(),
+		collector:             kvsrv_eval.NewPBSCollector(),
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -132,6 +132,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 // and includes information such as the version of the object.
 // TODO: handle the case where the read quorum is not met
 func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
+	startedAt := time.Now()
 	kv.coordMu.Lock()
 	defer kv.coordMu.Unlock()
 
@@ -158,10 +159,10 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 			ok := kv.ends[serverID].Call("KVServer.ReplicaGet", &forwardArgs, &forwardReply)
 			receivedAt := time.Now()
 
-			if ok && kv.tracer != nil {
+			if ok && kv.collector != nil {
 				arrivedAt := forwardReply.ArrivedAt
 				respondedAt := forwardReply.RespondedAt
-				_ = kv.tracer.ObserveRead(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
+				_ = kv.collector.ObserveReadLatency(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
 			}
 
 			ch <- rpc.ForwardGetResult{ServerID: serverID, OK: ok, Reply: forwardReply}
@@ -195,6 +196,9 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 
 				reply.Objects = rpc.CopyObjects(siblings)
 				reply.Err = rpc.OK
+				if kv.collector != nil {
+					kv.collector.ObserveCompletedRead(kvsrv_eval.NewCompletedRead(args.Key, startedAt, time.Now(), rpc.CopyObjects(siblings)))
+				}
 				return
 			}
 		} else if res.Reply.Err == rpc.ErrNoKey {
@@ -218,6 +222,7 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 // the object should be placed based on the associated key, and writes the replicas to disk.
 // TODO: handle the case where the write quorum is not met
 func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
+	startedAt := time.Now()
 	kv.coordMu.Lock()
 	defer kv.coordMu.Unlock()
 
@@ -291,10 +296,10 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 					ch <- rpc.ForwardPutResult{OK: false}
 					return
 				}
-				if kv.tracer != nil {
+				if kv.collector != nil {
 					arrivedAt := forwardReply.ArrivedAt
 					respondedAt := forwardReply.RespondedAt
-					_ = kv.tracer.ObserveWrite(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
+					_ = kv.collector.ObserveWriteLatency(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
 				}
 
 				ch <- rpc.ForwardPutResult{OK: true, Err: forwardReply.Err}
@@ -316,6 +321,9 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 			if successCount >= kv.writeQuorum {
 				go drainForwardPutResults(ch, len(plans)-i-1)
 				reply.Err = rpc.OK // reply OK immediately when the W quorum is met
+				if kv.collector != nil {
+					kv.collector.ObserveCompletedWrite(kvsrv_eval.NewCompletedWrite(args.Key, startedAt, time.Now(), args.Object))
+				}
 				return
 			}
 		} else if res.Err == rpc.ErrVersion {
