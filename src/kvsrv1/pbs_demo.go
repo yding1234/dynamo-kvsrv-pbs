@@ -1,10 +1,12 @@
 package kvsrv
 
 import (
+	"encoding/csv"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,22 @@ import (
 )
 
 const pbsDemoNumSectors = 8
+
+type PBSDemoStats struct {
+	WriteOK         int64
+	WriteErrVersion int64
+	WriteOtherErr   int64
+	ReadOK          int64
+	ReadErr         int64
+	RefreshOK       int64
+	RefreshErr      int64
+}
+
+type PBSDemoResult struct {
+	Plots        kvsrv_eval.PlotOutput
+	Stats        PBSDemoStats
+	StatsCSVPath string
+}
 
 type PBSDemoOptions struct {
 	OutputDir          string
@@ -51,7 +69,7 @@ func DefaultPBSDemoOptions() PBSDemoOptions {
 	}
 }
 
-func RunPBSDemo(opts PBSDemoOptions) (kvsrv_eval.PlotOutput, error) {
+func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	if opts.OutputDir == "" {
 		opts.OutputDir = "."
 	}
@@ -59,31 +77,31 @@ func RunPBSDemo(opts PBSDemoOptions) (kvsrv_eval.PlotOutput, error) {
 		opts.Key = "pbs-demo-key"
 	}
 	if opts.WorkloadIterations <= 0 {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("WorkloadIterations must be > 0")
+		return PBSDemoResult{}, fmt.Errorf("WorkloadIterations must be > 0")
 	}
 	if opts.NumWriters <= 0 {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("NumWriters must be > 0")
+		return PBSDemoResult{}, fmt.Errorf("NumWriters must be > 0")
 	}
 	if opts.NumReaders <= 0 {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("NumReaders must be > 0")
+		return PBSDemoResult{}, fmt.Errorf("NumReaders must be > 0")
 	}
 	if opts.NumNodes <= 0 {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("NumNodes must be > 0")
+		return PBSDemoResult{}, fmt.Errorf("NumNodes must be > 0")
 	}
 	if opts.PlotConfig.NumReplicas <= 0 {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("PlotConfig.NumReplicas must be > 0")
+		return PBSDemoResult{}, fmt.Errorf("PlotConfig.NumReplicas must be > 0")
 	}
 	if opts.PlotConfig.NumReplicas > opts.NumNodes {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("PlotConfig.NumReplicas must be <= NumNodes")
+		return PBSDemoResult{}, fmt.Errorf("PlotConfig.NumReplicas must be <= NumNodes")
 	}
 	if opts.PlotConfig.ReadQuorum <= 0 || opts.PlotConfig.ReadQuorum > opts.PlotConfig.NumReplicas {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("PlotConfig.ReadQuorum must be in [1, PlotConfig.NumReplicas]")
+		return PBSDemoResult{}, fmt.Errorf("PlotConfig.ReadQuorum must be in [1, PlotConfig.NumReplicas]")
 	}
 	if opts.PlotConfig.WriteQuorum <= 0 || opts.PlotConfig.WriteQuorum > opts.PlotConfig.NumReplicas {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("PlotConfig.WriteQuorum must be in [1, PlotConfig.NumReplicas]")
+		return PBSDemoResult{}, fmt.Errorf("PlotConfig.WriteQuorum must be in [1, PlotConfig.NumReplicas]")
 	}
 	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
-		return kvsrv_eval.PlotOutput{}, err
+		return PBSDemoResult{}, err
 	}
 
 	ring, _, servers, cleanup := makePBSDemoCluster(opts.NumNodes, opts.PlotConfig.NumReplicas, opts.PlotConfig.ReadQuorum, opts.PlotConfig.WriteQuorum)
@@ -92,13 +110,22 @@ func RunPBSDemo(opts PBSDemoOptions) (kvsrv_eval.PlotOutput, error) {
 	coordinatorID := ring.GetCoordinator(opts.Key)
 	coordinator := servers[coordinatorID]
 	if coordinator == nil {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("missing coordinator server %q", coordinatorID)
+		return PBSDemoResult{}, fmt.Errorf("missing coordinator server %q", coordinatorID)
 	}
+
+	var writeOK atomic.Int64
+	var writeErrVersion atomic.Int64
+	var writeOtherErr atomic.Int64
+	var readOK atomic.Int64
+	var readErr atomic.Int64
+	var refreshOK atomic.Int64
+	var refreshErr atomic.Int64
 
 	_, seedCtx, err := demoPut(coordinator, opts.Key, "seed-00", rpc.NewContext())
 	if err != nil {
-		return kvsrv_eval.PlotOutput{}, fmt.Errorf("initial seed write failed: %w", err)
+		return PBSDemoResult{}, fmt.Errorf("initial seed write failed: %w", err)
 	}
+	writeOK.Add(1)
 
 	var stopWorkers atomic.Bool
 	var readersWG sync.WaitGroup
@@ -118,9 +145,11 @@ func RunPBSDemo(opts PBSDemoOptions) (kvsrv_eval.PlotOutput, error) {
 			defer readersWG.Done()
 			for !stopWorkers.Load() {
 				if err := demoGet(coordinator, opts.Key); err != nil {
+					readErr.Add(1)
 					reportFatalErr(fmt.Errorf("reader %d: %w", readerID, err))
 					return
 				}
+				readOK.Add(1)
 				if opts.ReadSleep > 0 {
 					time.Sleep(opts.ReadSleep)
 				}
@@ -147,20 +176,25 @@ func RunPBSDemo(opts PBSDemoOptions) (kvsrv_eval.PlotOutput, error) {
 
 					switch putErr {
 					case rpc.OK:
+						writeOK.Add(1)
 						writerCtx = committedCtx
 						if opts.SleepBetweenOps > 0 {
 							time.Sleep(opts.SleepBetweenOps)
 						}
 						goto nextWrite
 					case rpc.ErrVersion:
+						writeErrVersion.Add(1)
 						latestCtx, err := demoGetLatestContext(coordinator, opts.Key)
 						if err != nil {
+							refreshErr.Add(1)
 							reportFatalErr(fmt.Errorf("writer %d iteration %d refresh failed: %w", writerID, i, err))
 							return
 						}
+						refreshOK.Add(1)
 						writerCtx = latestCtx
 						continue
 					default:
+						writeOtherErr.Add(1)
 						reportFatalErr(fmt.Errorf("writer %d iteration %d put failed: %v", writerID, i, putErr))
 						return
 					}
@@ -175,26 +209,72 @@ func RunPBSDemo(opts PBSDemoOptions) (kvsrv_eval.PlotOutput, error) {
 	readersWG.Wait()
 	select {
 	case err := <-workerErrCh:
-		return kvsrv_eval.PlotOutput{}, err
+		return PBSDemoResult{}, err
 	default:
 	}
 
 	output, err := kvsrv_eval.PlotToDir(opts.PlotConfig, coordinator.collector, opts.OutputDir)
 	if err != nil {
-		return kvsrv_eval.PlotOutput{}, err
+		return PBSDemoResult{}, err
 	}
 	if err := assertPBSDemoPlotExists(output.DeltaPPath); err != nil {
-		return kvsrv_eval.PlotOutput{}, err
+		return PBSDemoResult{}, err
 	}
 	if err := assertPBSDemoPlotExists(output.KPPath); err != nil {
-		return kvsrv_eval.PlotOutput{}, err
+		return PBSDemoResult{}, err
+	}
+
+	stats := PBSDemoStats{
+		WriteOK:         writeOK.Load(),
+		WriteErrVersion: writeErrVersion.Load(),
+		WriteOtherErr:   writeOtherErr.Load(),
+		ReadOK:          readOK.Load(),
+		ReadErr:         readErr.Load(),
+		RefreshOK:       refreshOK.Load(),
+		RefreshErr:      refreshErr.Load(),
 	}
 
 	output.DeltaPPath, _ = filepath.Abs(output.DeltaPPath)
 	output.KPPath, _ = filepath.Abs(output.KPPath)
 	output.DeltaCSVPath, _ = filepath.Abs(output.DeltaCSVPath)
 	output.KPCSVPath, _ = filepath.Abs(output.KPCSVPath)
-	return output, nil
+	statsCSVPath := filepath.Join(opts.OutputDir, "pbs_demo_stats.csv")
+	if err := writePBSDemoStatsCSV(statsCSVPath, stats); err != nil {
+		return PBSDemoResult{}, err
+	}
+	statsCSVPath, _ = filepath.Abs(statsCSVPath)
+
+	return PBSDemoResult{
+		Plots:        output,
+		Stats:        stats,
+		StatsCSVPath: statsCSVPath,
+	}, nil
+}
+
+func writePBSDemoStatsCSV(path string, stats PBSDemoStats) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	rows := [][]string{
+		{"metric", "value"},
+		{"write_ok", strconv.FormatInt(stats.WriteOK, 10)},
+		{"write_err_version", strconv.FormatInt(stats.WriteErrVersion, 10)},
+		{"write_other_err", strconv.FormatInt(stats.WriteOtherErr, 10)},
+		{"read_ok", strconv.FormatInt(stats.ReadOK, 10)},
+		{"read_err", strconv.FormatInt(stats.ReadErr, 10)},
+		{"refresh_ok", strconv.FormatInt(stats.RefreshOK, 10)},
+		{"refresh_err", strconv.FormatInt(stats.RefreshErr, 10)},
+	}
+
+	writer := csv.NewWriter(file)
+	if err := writer.WriteAll(rows); err != nil {
+		return err
+	}
+	writer.Flush()
+	return writer.Error()
 }
 
 func demoPut(coordinator *KVServer, key string, value string, baseCtx rpc.Context) (rpc.Err, rpc.Context, error) {

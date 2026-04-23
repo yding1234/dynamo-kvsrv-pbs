@@ -45,15 +45,25 @@ func main() {
 	opts.PlotConfig.RNG = rand.New(rand.NewSource(*seed))
 
 	startedAt := time.Now()
-	output, err := kvsrv.RunPBSDemo(opts)
+	result, err := kvsrv.RunPBSDemo(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kvsrv1pbsplot: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("generated Delta-P plot: %s\n", output.DeltaPPath)
-	fmt.Printf("generated K-P plot: %s\n", output.KPPath)
-	fmt.Printf("generated Delta-P CSV: %s\n", output.DeltaCSVPath)
-	fmt.Printf("generated K-P CSV: %s\n", output.KPCSVPath)
+	fmt.Printf("generated Delta-P plot: %s\n", result.Plots.DeltaPPath)
+	fmt.Printf("generated K-P plot: %s\n", result.Plots.KPPath)
+	fmt.Printf("generated Delta-P CSV: %s\n", result.Plots.DeltaCSVPath)
+	fmt.Printf("generated K-P CSV: %s\n", result.Plots.KPCSVPath)
+	fmt.Printf("generated demo stats CSV: %s\n", result.StatsCSVPath)
+	fmt.Printf("stats: write_ok=%d write_err_version=%d write_other_err=%d read_ok=%d read_err=%d refresh_ok=%d refresh_err=%d\n",
+		result.Stats.WriteOK,
+		result.Stats.WriteErrVersion,
+		result.Stats.WriteOtherErr,
+		result.Stats.ReadOK,
+		result.Stats.ReadErr,
+		result.Stats.RefreshOK,
+		result.Stats.RefreshErr,
+	)
 	fmt.Printf("completed in %s\n", time.Since(startedAt).Round(time.Millisecond))
 }

@@ -133,8 +133,8 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 // TODO: handle the case where the read quorum is not met
 func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	startedAt := time.Now()
-	kv.coordMu.Lock()
-	defer kv.coordMu.Unlock()
+	// kv.coordMu.Lock()
+	// defer kv.coordMu.Unlock()
 
 	// check if myself is the coordinator
 	if kv.ring.GetCoordinator(args.Key) != kv.id {
@@ -223,8 +223,8 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 // TODO: handle the case where the write quorum is not met
 func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	startedAt := time.Now()
-	kv.coordMu.Lock()
-	defer kv.coordMu.Unlock()
+	// kv.coordMu.Lock()
+	// defer kv.coordMu.Unlock()
 
 	// check if myself is the coordinator
 	if kv.ring.GetCoordinator(args.Key) != kv.id {
@@ -396,7 +396,7 @@ func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		reply.Err = rpc.ErrNoKey
 		return
 	}
-	reply.Objects = siblings
+	reply.Objects = rpc.CopyObjects(siblings)
 	reply.Err = rpc.OK
 	return
 }

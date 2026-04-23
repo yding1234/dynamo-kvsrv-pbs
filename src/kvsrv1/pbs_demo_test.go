@@ -13,12 +13,18 @@ func TestPBSDemoPlotsFromRunningCluster(t *testing.T) {
 		t.Fatalf("RunPBSDemo failed: %v", err)
 	}
 
-	if err := assertPBSDemoPlotExists(output.DeltaPPath); err != nil {
+	if err := assertPBSDemoPlotExists(output.Plots.DeltaPPath); err != nil {
 		t.Fatalf("delta plot check failed: %v", err)
 	}
-	if err := assertPBSDemoPlotExists(output.KPPath); err != nil {
+	if err := assertPBSDemoPlotExists(output.Plots.KPPath); err != nil {
 		t.Fatalf("k plot check failed: %v", err)
 	}
+	if output.Stats.ReadOK == 0 {
+		t.Fatalf("expected demo to record successful reads")
+	}
+	if output.Stats.WriteOK == 0 {
+		t.Fatalf("expected demo to record successful writes")
+	}
 
-	t.Logf("generated PBS plots from running cluster: %s and %s", output.DeltaPPath, output.KPPath)
+	t.Logf("generated PBS plots from running cluster: %s and %s", output.Plots.DeltaPPath, output.Plots.KPPath)
 }
