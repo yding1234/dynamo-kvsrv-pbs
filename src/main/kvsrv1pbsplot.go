@@ -23,6 +23,7 @@ func main() {
 	sleepBetweenOps := flag.Duration("sleep", opts.SleepBetweenOps, "delay between operations")
 	numReaders := flag.Int("readers", opts.NumReaders, "number of reader goroutines")
 	readSleep := flag.Duration("read-sleep", opts.ReadSleep, "delay between reader get operations")
+	probeReads := flag.Int("probe-reads", opts.ProbeReadsPerWrite, "number of immediate probe reads after each successful write")
 	delta := flag.Duration("delta", opts.PlotConfig.Delta, "max delta value for the delta-P sweep")
 	maxK := flag.Int("k", opts.PlotConfig.K, "max K value for the K-P sweep")
 	simIterations := flag.Int("sim-iters", opts.PlotConfig.Iterations, "number of Monte Carlo iterations for delta-P prediction")
@@ -39,6 +40,7 @@ func main() {
 	opts.SleepBetweenOps = *sleepBetweenOps
 	opts.NumReaders = *numReaders
 	opts.ReadSleep = *readSleep
+	opts.ProbeReadsPerWrite = *probeReads
 	opts.PlotConfig.Delta = *delta
 	opts.PlotConfig.K = *maxK
 	opts.PlotConfig.Iterations = *simIterations
@@ -56,12 +58,14 @@ func main() {
 	fmt.Printf("generated Delta-P CSV: %s\n", result.Plots.DeltaCSVPath)
 	fmt.Printf("generated K-P CSV: %s\n", result.Plots.KPCSVPath)
 	fmt.Printf("generated demo stats CSV: %s\n", result.StatsCSVPath)
-	fmt.Printf("stats: write_ok=%d write_err_version=%d write_other_err=%d read_ok=%d read_err=%d refresh_ok=%d refresh_err=%d\n",
+	fmt.Printf("stats: write_ok=%d write_err_version=%d write_other_err=%d read_ok=%d read_err=%d probe_read_ok=%d probe_read_err=%d refresh_ok=%d refresh_err=%d\n",
 		result.Stats.WriteOK,
 		result.Stats.WriteErrVersion,
 		result.Stats.WriteOtherErr,
 		result.Stats.ReadOK,
 		result.Stats.ReadErr,
+		result.Stats.ProbeReadOK,
+		result.Stats.ProbeReadErr,
 		result.Stats.RefreshOK,
 		result.Stats.RefreshErr,
 	)

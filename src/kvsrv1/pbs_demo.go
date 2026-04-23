@@ -25,6 +25,8 @@ type PBSDemoStats struct {
 	WriteOtherErr   int64
 	ReadOK          int64
 	ReadErr         int64
+	ProbeReadOK     int64
+	ProbeReadErr    int64
 	RefreshOK       int64
 	RefreshErr      int64
 }
@@ -43,6 +45,7 @@ type PBSDemoOptions struct {
 	SleepBetweenOps    time.Duration
 	NumReaders         int
 	ReadSleep          time.Duration
+	ProbeReadsPerWrite int
 	NumNodes           int
 	PlotConfig         kvsrv_eval.SimulationConfig
 }
@@ -56,6 +59,7 @@ func DefaultPBSDemoOptions() PBSDemoOptions {
 		SleepBetweenOps:    2 * time.Millisecond,
 		NumReaders:         3,
 		ReadSleep:          1 * time.Millisecond,
+		ProbeReadsPerWrite: 2,
 		NumNodes:           4,
 		PlotConfig: kvsrv_eval.SimulationConfig{
 			NumReplicas: 3,
@@ -84,6 +88,9 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	}
 	if opts.NumReaders <= 0 {
 		return PBSDemoResult{}, fmt.Errorf("NumReaders must be > 0")
+	}
+	if opts.ProbeReadsPerWrite < 0 {
+		return PBSDemoResult{}, fmt.Errorf("ProbeReadsPerWrite must be >= 0")
 	}
 	if opts.NumNodes <= 0 {
 		return PBSDemoResult{}, fmt.Errorf("NumNodes must be > 0")
@@ -118,6 +125,8 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	var writeOtherErr atomic.Int64
 	var readOK atomic.Int64
 	var readErr atomic.Int64
+	var probeReadOK atomic.Int64
+	var probeReadErr atomic.Int64
 	var refreshOK atomic.Int64
 	var refreshErr atomic.Int64
 
@@ -178,6 +187,14 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 					case rpc.OK:
 						writeOK.Add(1)
 						writerCtx = committedCtx
+						for probe := 0; probe < opts.ProbeReadsPerWrite; probe++ {
+							if err := demoGet(coordinator, opts.Key); err != nil {
+								probeReadErr.Add(1)
+								reportFatalErr(fmt.Errorf("writer %d iteration %d probe read %d: %w", writerID, i, probe, err))
+								return
+							}
+							probeReadOK.Add(1)
+						}
 						if opts.SleepBetweenOps > 0 {
 							time.Sleep(opts.SleepBetweenOps)
 						}
@@ -230,6 +247,8 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 		WriteOtherErr:   writeOtherErr.Load(),
 		ReadOK:          readOK.Load(),
 		ReadErr:         readErr.Load(),
+		ProbeReadOK:     probeReadOK.Load(),
+		ProbeReadErr:    probeReadErr.Load(),
 		RefreshOK:       refreshOK.Load(),
 		RefreshErr:      refreshErr.Load(),
 	}
@@ -265,6 +284,8 @@ func writePBSDemoStatsCSV(path string, stats PBSDemoStats) error {
 		{"write_other_err", strconv.FormatInt(stats.WriteOtherErr, 10)},
 		{"read_ok", strconv.FormatInt(stats.ReadOK, 10)},
 		{"read_err", strconv.FormatInt(stats.ReadErr, 10)},
+		{"probe_read_ok", strconv.FormatInt(stats.ProbeReadOK, 10)},
+		{"probe_read_err", strconv.FormatInt(stats.ProbeReadErr, 10)},
 		{"refresh_ok", strconv.FormatInt(stats.RefreshOK, 10)},
 		{"refresh_err", strconv.FormatInt(stats.RefreshErr, 10)},
 	}
