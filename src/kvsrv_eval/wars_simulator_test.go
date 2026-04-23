@@ -81,3 +81,52 @@ func TestSimulateDeltaPImprovesWithLargerDelta(t *testing.T) {
 		t.Fatalf("expected larger delta to improve consistency in this workload: early=%v later=%v", early.Probability, later.Probability)
 	}
 }
+
+func TestSimulateDeltaPRejectsInvalidConfig(t *testing.T) {
+	samplers, err := NewWARSSamplers(WARSTrace{
+		WriteRequests: []time.Duration{time.Millisecond},
+		WriteAcks:     []time.Duration{time.Millisecond},
+		ReadRequests:  []time.Duration{time.Millisecond},
+		ReadResponses: []time.Duration{time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("failed to build samplers: %v", err)
+	}
+
+	_, err = SimulateDeltaP(SimulationConfig{
+		NumReplicas: 3,
+		ReadQuorum:  1,
+		WriteQuorum: 1,
+		Delta:       0,
+		Iterations:  0,
+	}, samplers)
+	if err == nil {
+		t.Fatalf("expected invalid config to be rejected")
+	}
+}
+
+func TestSimulateDeltaPAllowsNilRNG(t *testing.T) {
+	samplers, err := NewWARSSamplers(WARSTrace{
+		WriteRequests: []time.Duration{time.Millisecond},
+		WriteAcks:     []time.Duration{time.Millisecond},
+		ReadRequests:  []time.Duration{time.Millisecond},
+		ReadResponses: []time.Duration{time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("failed to build samplers: %v", err)
+	}
+
+	result, err := SimulateDeltaP(SimulationConfig{
+		NumReplicas: 3,
+		ReadQuorum:  2,
+		WriteQuorum: 2,
+		Delta:       0,
+		Iterations:  10,
+	}, samplers)
+	if err != nil {
+		t.Fatalf("expected nil RNG to be handled, got %v", err)
+	}
+	if result.Iterations != 10 {
+		t.Fatalf("unexpected iteration count: %v", result.Iterations)
+	}
+}

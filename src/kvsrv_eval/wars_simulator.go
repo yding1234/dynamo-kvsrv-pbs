@@ -14,24 +14,10 @@ type SimulationConfig struct {
 	ReadQuorum  int
 	WriteQuorum int
 	Delta       time.Duration
-	Iterations  int
-	RNG         *rand.Rand
-}
+	K           int
+	Iterations  int        // number of trials to run
+	RNG         *rand.Rand // random number generator
 
-func (c SimulationConfig) Validate() error {
-	switch {
-	case c.NumReplicas <= 0:
-		return fmt.Errorf("NumReplicas must be > 0")
-	case c.ReadQuorum <= 0 || c.ReadQuorum > c.NumReplicas:
-		return fmt.Errorf("ReadQuorum must be in [1, NumReplicas]")
-	case c.WriteQuorum <= 0 || c.WriteQuorum > c.NumReplicas:
-		return fmt.Errorf("WriteQuorum must be in [1, NumReplicas]")
-	case c.Delta < 0:
-		return fmt.Errorf("Delta must be >= 0")
-	case c.Iterations <= 0:
-		return fmt.Errorf("Iterations must be > 0")
-	}
-	return nil
 }
 
 type SimulationResult struct {
@@ -40,29 +26,20 @@ type SimulationResult struct {
 	Probability      float64
 }
 
-// SimulateDeltaP runs the WARS Monte Carlo simulation described in the PBS
-// paper and returns the estimated probability of a read being consistent
-// delta time after a write commits.
-func SimulateDeltaP(config SimulationConfig, samplers WARSSamplers) (SimulationResult, error) {
-	if err := config.Validate(); err != nil {
-		return SimulationResult{}, err
+func validateDeltaPConfig(config SimulationConfig) error {
+	switch {
+	case config.NumReplicas <= 0:
+		return fmt.Errorf("NumReplicas must be > 0")
+	case config.ReadQuorum <= 0 || config.ReadQuorum > config.NumReplicas:
+		return fmt.Errorf("ReadQuorum must be in [1, NumReplicas]")
+	case config.WriteQuorum <= 0 || config.WriteQuorum > config.NumReplicas:
+		return fmt.Errorf("WriteQuorum must be in [1, NumReplicas]")
+	case config.Delta < 0:
+		return fmt.Errorf("Delta must be >= 0")
+	case config.Iterations <= 0:
+		return fmt.Errorf("Iterations must be > 0")
 	}
-	if err := validateSamplers(samplers); err != nil {
-		return SimulationResult{}, err
-	}
-
-	consistentTrials := 0
-	for iter := 0; iter < config.Iterations; iter++ {
-		if simulateTrial(config, samplers) {
-			consistentTrials++
-		}
-	}
-
-	return SimulationResult{
-		ConsistentTrials: consistentTrials,
-		Iterations:       config.Iterations,
-		Probability:      float64(consistentTrials) / float64(config.Iterations),
-	}, nil
+	return nil
 }
 
 func validateSamplers(samplers WARSSamplers) error {
@@ -77,6 +54,34 @@ func validateSamplers(samplers WARSSamplers) error {
 		return fmt.Errorf("ReadResponse sampler is empty")
 	}
 	return nil
+}
+
+// SimulateDeltaP runs the WARS Monte Carlo simulation described in the PBS
+// paper and returns the estimated probability of a read being consistent
+// delta time after a write commits.
+func SimulateDeltaP(config SimulationConfig, samplers WARSSamplers) (SimulationResult, error) {
+	if err := validateDeltaPConfig(config); err != nil {
+		return SimulationResult{}, err
+	}
+	if err := validateSamplers(samplers); err != nil {
+		return SimulationResult{}, err
+	}
+	if config.RNG == nil {
+		config.RNG = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+
+	consistentTrials := 0
+	for iter := 0; iter < config.Iterations; iter++ {
+		if simulateTrial(config, samplers) {
+			consistentTrials++
+		}
+	}
+
+	return SimulationResult{
+		ConsistentTrials: consistentTrials,
+		Iterations:       config.Iterations,
+		Probability:      float64(consistentTrials) / float64(config.Iterations),
+	}, nil
 }
 
 func simulateTrial(config SimulationConfig, samplers WARSSamplers) bool {
