@@ -269,3 +269,19 @@ func (c *PBSCollector) Reads() []CompletedRead {
 	defer c.mu.Unlock()
 	return append([]CompletedRead(nil), c.reads...)
 }
+
+func (c *PBSCollector) AddWriteSample(requestLatency, ackLatency time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.trace.WriteRequests = append(c.trace.WriteRequests, requestLatency)
+	c.trace.WriteAcks = append(c.trace.WriteAcks, ackLatency)
+	return nil
+}
+
+func (c *PBSCollector) AddReadSample(requestLatency, responseLatency time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.trace.ReadRequests = append(c.trace.ReadRequests, requestLatency)
+	c.trace.ReadResponses = append(c.trace.ReadResponses, responseLatency)
+	return nil
+}

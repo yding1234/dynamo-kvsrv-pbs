@@ -57,6 +57,7 @@ func ObserveKPSweep(collector *PBSCollector, ks []int) []float64 {
 }
 
 func isDeltaRegular(read CompletedRead, writes []CompletedWrite, delta time.Duration) bool {
+	cutoff := read.StartedAt.Add(-delta)
 	latestWriteBeforeDelta :=  NewCompletedWrite(read.Key, time.Time{}, time.Time{}, rpc.Object{})
 
 	for _, write := range writes {
@@ -75,7 +76,7 @@ func isDeltaRegular(read CompletedRead, writes []CompletedWrite, delta time.Dura
 			continue
 		}
 
-		if write.CommittedAt.Before(read.StartedAt.Sub(delta)) {
+		if write.CommittedAt.Before(cutoff) {
 			if write.CommittedAt.After(latestWriteBeforeDelta.CommittedAt) {
 				latestWriteBeforeDelta = write
 			}

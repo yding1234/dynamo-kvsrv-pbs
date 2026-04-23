@@ -28,11 +28,11 @@ func TestEmpiricalSamplerReturnsObservedSamples(t *testing.T) {
 	}
 }
 
-func TestTracerObserveWriteAndRead(t *testing.T) {
+func TestPBSCollectorObserveWriteAndRead(t *testing.T) {
 	base := time.Unix(100, 0)
-	tracer := NewTracer()
+	collector := NewPBSCollector()
 
-	err := tracer.ObserveWrite(MessageTrace{
+	err := collector.ObserveWriteLatency(MessageTrace{
 		SentAt:      base,
 		ArrivedAt:   base.Add(3 * time.Millisecond),
 		RespondedAt: base.Add(8 * time.Millisecond),
@@ -41,7 +41,7 @@ func TestTracerObserveWriteAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ObserveWrite failed: %v", err)
 	}
-	err = tracer.ObserveRead(MessageTrace{
+	err = collector.ObserveReadLatency(MessageTrace{
 		SentAt:      base.Add(20 * time.Millisecond),
 		ArrivedAt:   base.Add(24 * time.Millisecond),
 		RespondedAt: base.Add(25 * time.Millisecond),
@@ -51,7 +51,7 @@ func TestTracerObserveWriteAndRead(t *testing.T) {
 		t.Fatalf("ObserveRead failed: %v", err)
 	}
 
-	trace := tracer.Trace()
+	trace := collector.Trace()
 	if got, want := trace.WriteRequests, []time.Duration{3 * time.Millisecond}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("unexpected write request samples: got=%v want=%v", got, want)
 	}
@@ -66,16 +66,16 @@ func TestTracerObserveWriteAndRead(t *testing.T) {
 	}
 }
 
-func TestTracerGetSamplersUsesTrace(t *testing.T) {
-	tracer := NewTracer()
-	if err := tracer.AddWriteSample(2*time.Millisecond, 5*time.Millisecond); err != nil {
+func TestPBSCollectorGetSamplersUsesTrace(t *testing.T) {
+	collector := NewPBSCollector()
+	if err := collector.AddWriteSample(2*time.Millisecond, 5*time.Millisecond); err != nil {
 		t.Fatalf("AddWriteSample failed: %v", err)
 	}
-	if err := tracer.AddReadSample(7*time.Millisecond, 11*time.Millisecond); err != nil {
+	if err := collector.AddReadSample(7*time.Millisecond, 11*time.Millisecond); err != nil {
 		t.Fatalf("AddReadSample failed: %v", err)
 	}
 
-	samplers, err := tracer.GetSamplers()
+	samplers, err := collector.GetSamplers()
 	if err != nil {
 		t.Fatalf("Samplers failed: %v", err)
 	}
@@ -93,9 +93,9 @@ func TestTracerGetSamplersUsesTrace(t *testing.T) {
 	}
 }
 
-func TestTracerObserveMultipleTraces(t *testing.T) {
+func TestPBSCollectorObserveMultipleTraces(t *testing.T) {
 	base := time.Unix(200, 0)
-	tracer := NewTracer()
+	collector := NewPBSCollector()
 
 	writeTraces := []MessageTrace{
 		{
@@ -127,17 +127,17 @@ func TestTracerObserveMultipleTraces(t *testing.T) {
 	}
 
 	for _, trace := range writeTraces {
-		if err := tracer.ObserveWrite(trace); err != nil {
-			t.Fatalf("ObserveWrite failed: %v", err)
+		if err := collector.ObserveWriteLatency(trace); err != nil {
+			t.Fatalf("ObserveWriteLatency failed: %v", err)
 		}
 	}
 	for _, trace := range readTraces {
-		if err := tracer.ObserveRead(trace); err != nil {
-			t.Fatalf("ObserveRead failed: %v", err)
+		if err := collector.ObserveReadLatency(trace); err != nil {
+			t.Fatalf("ObserveReadLatency failed: %v", err)
 		}
 	}
 
-	trace := tracer.Trace()
+	trace := collector.Trace()
 	if got, want := trace.WriteRequests, []time.Duration{2 * time.Millisecond, 4 * time.Millisecond}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("unexpected write request samples: got=%v want=%v", got, want)
 	}

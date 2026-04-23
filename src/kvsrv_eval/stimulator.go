@@ -143,12 +143,12 @@ func EvaluateDeltaP(trace WARSTrace, config SimulationConfig) (SimulationResult,
 	return SimulateDeltaP(config, samplers)
 }
 
-// tracer -> trace -> samplers -> simulator
-func EvaluateDeltaPFromTracer(tracer *Tracer, config SimulationConfig) (SimulationResult, error) {
-	if tracer == nil {
-		return SimulationResult{}, fmt.Errorf("tracer is nil")
+// collector -> trace -> samplers -> simulator
+func EvaluateDeltaPFromCollector(collector *PBSCollector, config SimulationConfig) (SimulationResult, error) {
+	if collector == nil {
+		return SimulationResult{}, fmt.Errorf("collector is nil")
 	}
-	return EvaluateDeltaP(tracer.Trace(), config)
+	return EvaluateDeltaP(collector.Trace(), config)
 }
 
 // EvaluateDeltaPSweep evaluates multiple delta values against the same observed
