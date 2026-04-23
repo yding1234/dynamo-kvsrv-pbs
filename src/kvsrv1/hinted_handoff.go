@@ -14,6 +14,7 @@ func (kv *KVServer) HintedPut(args *rpc.HintedPutArgs, reply *rpc.HintedPutReply
 
 	kv.hints[args.TargetServer] = append(kv.hints[args.TargetServer], args.PutArgs.Copy())
 	reply.Err = rpc.OK
+	return
 }
 
 func (kv *KVServer) StartHintedHandoff() {

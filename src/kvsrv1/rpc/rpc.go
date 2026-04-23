@@ -1,5 +1,7 @@
 package rpc
 
+import "time"
+
 type Err string
 
 const (
@@ -42,6 +44,9 @@ func (args PutArgs) Copy() PutArgs {
 
 type PutReply struct {
 	Err Err
+	// For tracing
+	ArrivedAt time.Time
+	RespondedAt time.Time
 }
 
 type GetArgs struct {
@@ -51,6 +56,9 @@ type GetArgs struct {
 type GetReply struct {
 	Objects []Object
 	Err     Err
+	// For tracing
+	ArrivedAt time.Time
+	RespondedAt time.Time
 }
 
 // for forwarding requests to the replicas
@@ -115,4 +123,7 @@ type HintedPutArgs struct {
 
 type HintedPutReply struct {
 	Err Err
+	// For tracing
+	ArrivedAt time.Time
+	RespondedAt time.Time
 }

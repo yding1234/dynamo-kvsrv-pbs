@@ -3,12 +3,13 @@ package kvsrv
 import (
 	"log"
 	"sync"
+	"time"
 
 	"6.5840/chr"
 	"6.5840/kvsrv1/rpc"
+	"6.5840/kvsrv_eval"
 	"6.5840/labrpc"
 	"6.5840/tester1"
-	"time"
 )
 
 const Debug = false
@@ -62,6 +63,9 @@ type KVServer struct {
 	// hinted handoff
 	hints                 map[string][]rpc.PutArgs // original target -> pending put requests
 	hintedHandoffInterval time.Duration
+
+	// tracing
+	tracer *kvsrv_eval.Tracer
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
@@ -85,6 +89,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		cleanupTimeout:        defaultCleanupTimeout,
 		hints:                 make(map[string][]rpc.PutArgs),
 		hintedHandoffInterval: defaultHintedHandoffInterval,
+		tracer:                kvsrv_eval.NewTracer(),
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -148,7 +153,17 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		go func(serverID string) {
 			forwardArgs := rpc.GetArgs{Key: args.Key}
 			forwardReply := rpc.GetReply{}
+
+			sentAt := time.Now()
 			ok := kv.ends[serverID].Call("KVServer.ReplicaGet", &forwardArgs, &forwardReply)
+			receivedAt := time.Now()
+
+			if ok && kv.tracer != nil {
+				arrivedAt := forwardReply.ArrivedAt
+				respondedAt := forwardReply.RespondedAt
+				_ = kv.tracer.ObserveRead(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
+			}
+
 			ch <- rpc.ForwardGetResult{ServerID: serverID, OK: ok, Reply: forwardReply}
 		}(serverID)
 	}
@@ -160,6 +175,7 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 
 	for len(results) < len(prefList) {
 		res := <-ch
+
 		results = append(results, res)
 		if !res.OK {
 			continue
@@ -173,7 +189,7 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 			}
 			if successCount >= kv.readQuorum {
 				canonicalSiblings := rpc.CopyObjects(siblings)
-				collectedResults := slice.Copy(results)
+				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
 				remaining := len(prefList) - len(results)
 				go kv.finishCoordGetReadRepair(args.Key, canonicalSiblings, collectedResults, ch, remaining)
 
@@ -184,7 +200,7 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 		} else if res.Reply.Err == rpc.ErrNoKey {
 			noKeyCount++
 			if noKeyCount >= kv.readQuorum {
-				collectedResults := slice.Copy(results)
+				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
 				remaining := len(prefList) - len(results)
 				go kv.finishCoordGetReadRepair(args.Key, nil, collectedResults, ch, remaining)
 				reply.Err = rpc.ErrNoKey
@@ -256,6 +272,7 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 				hintedReply := rpc.HintedPutReply{}
 
 				ok := kv.ends[plan.handoffServer].Call("KVServer.HintedPut", &hintedArgs, &hintedReply)
+
 				if !ok {
 					ch <- rpc.ForwardPutResult{OK: false}
 				} else {
@@ -265,11 +282,21 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 				// send the put request to the target server
 				forwardArgs := args.Copy()
 				forwardReply := rpc.PutReply{}
+
+				sentAt := time.Now()
 				ok := kv.ends[plan.targetServer].Call("KVServer.ReplicaPut", &forwardArgs, &forwardReply)
+				receivedAt := time.Now()
+
 				if !ok {
 					ch <- rpc.ForwardPutResult{OK: false}
 					return
 				}
+				if kv.tracer != nil {
+					arrivedAt := forwardReply.ArrivedAt
+					respondedAt := forwardReply.RespondedAt
+					_ = kv.tracer.ObserveWrite(kvsrv_eval.NewMessageTrace(sentAt, arrivedAt, respondedAt, receivedAt))
+				}
+
 				ch <- rpc.ForwardPutResult{OK: true, Err: forwardReply.Err}
 			}
 		}(plan)
@@ -348,6 +375,11 @@ func drainForwardPutResults(ch <-chan rpc.ForwardPutResult, remaining int) {
 // Get returns the value and context for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
+	reply.ArrivedAt = time.Now()
+	defer func() {
+		reply.RespondedAt = time.Now()
+	}()
+
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
@@ -366,6 +398,11 @@ func (kv *KVServer) ReplicaGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 // If the key doesn't exist, Put installs the value if the
 // args.Context is zero, and returns ErrNoKey otherwise.
 func (kv *KVServer) ReplicaPut(args *rpc.PutArgs, reply *rpc.PutReply) {
+	reply.ArrivedAt = time.Now()
+	defer func() {
+		reply.RespondedAt = time.Now()
+	}()
+
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
