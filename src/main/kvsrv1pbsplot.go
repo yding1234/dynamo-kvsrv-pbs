@@ -35,6 +35,7 @@ func main() {
 	yMin := flag.Float64("ymin", opts.PlotConfig.YMin, "y-axis lower bound for delta_p.png and k_p.png; <=0 means auto-fit")
 	yMax := flag.Float64("ymax", opts.PlotConfig.YMax, "y-axis upper bound for delta_p.png and k_p.png; <=0 means 1.0")
 	noZoomPlot := flag.Bool("no-zoom-plot", !opts.PlotConfig.EmitZoomPlot, "disable the auto delta_p_zoom.png / k_p_zoom.png output (zoomed to observed series only)")
+	randomCoordinator := flag.Bool("random-coordinator", opts.RandomCoordinator, "pick a fresh coordinator uniformly from the key's preference list per request (PBS-paper style); set false to always send to ring.GetCoordinator(key)")
 	seed := flag.Int64("seed", 7, "seed for the prediction RNG")
 	flag.Parse()
 
@@ -58,6 +59,7 @@ func main() {
 	opts.PlotConfig.YMin = *yMin
 	opts.PlotConfig.YMax = *yMax
 	opts.PlotConfig.EmitZoomPlot = !*noZoomPlot
+	opts.RandomCoordinator = *randomCoordinator
 	opts.PlotConfig.RNG = rand.New(rand.NewSource(*seed))
 
 	startedAt := time.Now()

@@ -14,7 +14,7 @@ import (
 
 const Debug = false
 
-var defaultAntiEntropyInterval = 500 * time.Millisecond
+var defaultAntiEntropyInterval = 100 * time.Millisecond
 var defaultGossipInterval = 100 * time.Millisecond
 var defaultHeartbeatTimeout = 100 * time.Millisecond
 var defaultFailureTimeout = 500 * time.Millisecond
@@ -149,8 +149,10 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// kv.coordMu.Lock()
 	// defer kv.coordMu.Unlock()
 
-	// check if myself is the coordinator
-	if kv.ring.GetCoordinator(args.Key) != kv.id {
+	// Any node in the key's preference list may serve as coordinator
+	// (matches the PBS paper's "client picks a random replica" assumption
+	// and Dynamo/Cassandra's symmetric coordinator role).
+	if !kv.isInPreferenceList(args.Key) {
 		reply.Err = rpc.ErrNotCoordinator
 		return
 	}
@@ -247,8 +249,9 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// kv.coordMu.Lock()
 	// defer kv.coordMu.Unlock()
 
-	// check if myself is the coordinator
-	if kv.ring.GetCoordinator(args.Key) != kv.id {
+	// Any node in the key's preference list may serve as coordinator (see
+	// CoordGet for rationale).
+	if !kv.isInPreferenceList(args.Key) {
 		reply.Err = rpc.ErrNotCoordinator
 		return
 	}

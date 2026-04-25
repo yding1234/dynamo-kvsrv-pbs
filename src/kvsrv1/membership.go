@@ -170,6 +170,16 @@ func (kv *KVServer) GetAllMembers() []rpc.MemberInfo {
 	return memberInfos
 }
 
+
+func (kv *KVServer) isInPreferenceList(key string) bool {
+	for _, id := range kv.ring.GetPreferenceList(key) {
+		if id == kv.id {
+			return true
+		}
+	}
+	return false
+}
+
 func (kv *KVServer) filterDeadMembers(serverIDs []string) []string {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
