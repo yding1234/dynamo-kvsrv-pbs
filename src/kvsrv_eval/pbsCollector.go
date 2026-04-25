@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+	"slices"
+	"sort"
 
 	"6.5840/kvsrv1/rpc"
 )
@@ -54,15 +56,8 @@ func (m MessageTrace) ResponseLatency() time.Duration {
 	return m.ReceivedAt.Sub(m.RespondedAt)
 }
 
-// WARSTrace stores the raw observed samples for the four WARS latency classes.
-type WARSTrace struct {
-	WriteRequests []time.Duration // W
-	WriteAcks     []time.Duration // A
-	ReadRequests  []time.Duration // R
-	ReadResponses []time.Duration // S
-}
-
 // EmpiricalSampler resamples directly from observed latency samples.
+// TODO: we can  use a different sampler
 type EmpiricalSampler struct {
 	samples []time.Duration
 }
@@ -71,7 +66,7 @@ func NewEmpiricalSampler(samples []time.Duration) (EmpiricalSampler, error) {
 	if len(samples) == 0 {
 		return EmpiricalSampler{}, fmt.Errorf("sampler requires at least one sample")
 	}
-	return EmpiricalSampler{samples: append([]time.Duration(nil), samples...)}, nil
+	return EmpiricalSampler{samples: slices.Clone(samples)}, nil
 }
 
 func (s EmpiricalSampler) Len() int {
@@ -79,17 +74,25 @@ func (s EmpiricalSampler) Len() int {
 }
 
 func (s EmpiricalSampler) Samples() []time.Duration {
-	return append([]time.Duration(nil), s.samples...)
+	return slices.Clone(s.samples)
 }
 
 func (s EmpiricalSampler) GetSample(rng *rand.Rand) time.Duration {
-	if len(s.samples) == 0 {
+	if s.Len() == 0 {
 		panic("sampling from empty empirical sampler")
 	}
-	return s.samples[rng.Intn(len(s.samples))]
+	return s.samples[rng.Intn(s.Len())]
 }
 
-// WARSSamplers packages one sampler per WARS latency class.
+// store raw observed samples for the four WARS latency classes
+type WARSTrace struct {
+	WriteRequests []time.Duration // W
+	WriteAcks     []time.Duration // A
+	ReadRequests  []time.Duration // R
+	ReadResponses []time.Duration // S
+}
+
+// package samplers for each WARS latency class
 type WARSSamplers struct {
 	WriteRequest EmpiricalSampler
 	WriteAck     EmpiricalSampler
@@ -123,6 +126,7 @@ func NewWARSSamplers(trace WARSTrace) (WARSSamplers, error) {
 	}, nil
 }
 
+// record the details of a completed write operation
 type CompletedWrite struct {
 	Key         string
 	StartedAt   time.Time
@@ -130,6 +134,7 @@ type CompletedWrite struct {
 	Object      rpc.Object
 }
 
+// record the details of a completed read operation
 type CompletedRead struct {
 	Key             string
 	StartedAt       time.Time
@@ -158,6 +163,7 @@ func NewCompletedRead(key string, startedAt time.Time, returnedAt time.Time, ret
 	}
 }
 
+// collect the details of the completed writes and reads
 type PBSCollector struct {
 	mu sync.Mutex
 
@@ -179,6 +185,7 @@ func NewPBSCollector() *PBSCollector {
 func (c *PBSCollector) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.trace = WARSTrace{}
 	c.writes = make([]CompletedWrite, 0)
 	c.reads = make([]CompletedRead, 0)
@@ -189,15 +196,19 @@ func (c *PBSCollector) Trace() WARSTrace {
 	defer c.mu.Unlock()
 
 	return WARSTrace{
-		WriteRequests: append([]time.Duration(nil), c.trace.WriteRequests...),
-		WriteAcks:     append([]time.Duration(nil), c.trace.WriteAcks...),
-		ReadRequests:  append([]time.Duration(nil), c.trace.ReadRequests...),
-		ReadResponses: append([]time.Duration(nil), c.trace.ReadResponses...),
+		WriteRequests: slices.Clone(c.trace.WriteRequests),
+		WriteAcks:     slices.Clone(c.trace.WriteAcks),
+		ReadRequests:  slices.Clone(c.trace.ReadRequests),
+		ReadResponses: slices.Clone(c.trace.ReadResponses),
 	}
 }
 
-func (c *PBSCollector) GetSamplers() (WARSSamplers, error) {
-	return NewWARSSamplers(c.Trace())
+func (c *PBSCollector) GetSamplers() WARSSamplers {
+	samplers, err := NewWARSSamplers(c.Trace())
+	if err != nil {
+		panic(err)
+	}
+	return samplers
 }
 
 func (c *PBSCollector) ObserveWriteLatency(m MessageTrace) error {
@@ -229,13 +240,20 @@ func (c *PBSCollector) ObserveCompletedWrite(w CompletedWrite) {
 	defer c.mu.Unlock()
 
 	// insert the write into the writes list by committed time
-	insertIndex := len(c.writes)
-	for i := range c.writes {
-		if c.writes[i].CommittedAt.After(w.CommittedAt) {
-			insertIndex = i
-			break
-		}
-	}
+	// TODO: use a binary search to find the insert index
+	// insertIndex := len(c.writes)
+	// for i := range c.writes {
+	// 	if c.writes[i].CommittedAt.After(w.CommittedAt) {
+	// 		insertIndex = i
+	// 		break
+	// 	}
+	// }
+	// c.writes = append(c.writes, CompletedWrite{})
+	// copy(c.writes[insertIndex+1:], c.writes[insertIndex:])
+	// c.writes[insertIndex] = w
+	insertIndex := sort.Search(len(c.writes), func(i int) bool {
+		return c.writes[i].CommittedAt.After(w.CommittedAt)
+	})
 	c.writes = append(c.writes, CompletedWrite{})
 	copy(c.writes[insertIndex+1:], c.writes[insertIndex:])
 	c.writes[insertIndex] = w
@@ -246,13 +264,19 @@ func (c *PBSCollector) ObserveCompletedRead(r CompletedRead) {
 	defer c.mu.Unlock()
 
 	// insert the read into the reads list by returned time
-	insertIndex := len(c.reads)
-	for i := range c.reads {
-		if c.reads[i].ReturnedAt.After(r.ReturnedAt) {
-			insertIndex = i
-			break
-		}
-	}
+	// insertIndex := len(c.reads)
+	// for i := range c.reads {
+	// 	if c.reads[i].ReturnedAt.After(r.ReturnedAt) {
+	// 		insertIndex = i
+	// 		break
+	// 	}
+	// }
+	// c.reads = append(c.reads, CompletedRead{})
+	// copy(c.reads[insertIndex+1:], c.reads[insertIndex:])
+	// c.reads[insertIndex] = r
+	insertIndex := sort.Search(len(c.reads), func(i int) bool {
+		return c.reads[i].ReturnedAt.After(r.ReturnedAt)
+	})
 	c.reads = append(c.reads, CompletedRead{})
 	copy(c.reads[insertIndex+1:], c.reads[insertIndex:])
 	c.reads[insertIndex] = r
@@ -261,13 +285,13 @@ func (c *PBSCollector) ObserveCompletedRead(r CompletedRead) {
 func (c *PBSCollector) Writes() []CompletedWrite {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]CompletedWrite(nil), c.writes...)
+	return slices.Clone(c.writes)
 }
 
 func (c *PBSCollector) Reads() []CompletedRead {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]CompletedRead(nil), c.reads...)
+	return slices.Clone(c.reads)
 }
 
 func (c *PBSCollector) AddWriteSample(requestLatency, ackLatency time.Duration) error {

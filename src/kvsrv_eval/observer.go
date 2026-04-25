@@ -7,9 +7,7 @@ import (
 	"6.5840/vclock"
 )
 
-func ObserveDeltaP(collector *PBSCollector, delta time.Duration) float64 {
-	writes := collector.Writes()
-	reads := collector.Reads()
+func ObserveDeltaP(reads []CompletedRead, writes []CompletedWrite, delta time.Duration) float64 {
 
 	if len(reads) == 0 {
 		return 0
@@ -24,9 +22,7 @@ func ObserveDeltaP(collector *PBSCollector, delta time.Duration) float64 {
 	return float64(consistentCount) / float64(len(reads))
 }
 
-func ObserveKP(collector *PBSCollector, k int) float64 {
-	writes := collector.Writes()
-	reads := collector.Reads()
+func ObserveKP(reads []CompletedRead, writes []CompletedWrite, k int) float64 {
 	if len(reads) == 0 {
 		return 0
 	}
@@ -42,16 +38,22 @@ func ObserveKP(collector *PBSCollector, k int) float64 {
 
 func ObserveDeltaPSweep(collector *PBSCollector, deltas []time.Duration) []float64 {
 	results := make([]float64, len(deltas))
+	writes := collector.Writes()
+	reads := collector.Reads()
+
 	for i, delta := range deltas {
-		results[i] = ObserveDeltaP(collector, delta)
+		results[i] = ObserveDeltaP(reads, writes, delta)
 	}
 	return results
 }
 
 func ObserveKPSweep(collector *PBSCollector, ks []int) []float64 {
 	results := make([]float64, len(ks))
+	writes := collector.Writes()
+	reads := collector.Reads()
+
 	for i, k := range ks {
-		results[i] = ObserveKP(collector, k)
+		results[i] = ObserveKP(reads, writes, k)
 	}
 	return results
 }
@@ -88,8 +90,6 @@ func isDeltaRegular(read CompletedRead, writes []CompletedWrite, delta time.Dura
 		}
 	}
 
-	// If the read did not return a completed write from the delta window, it may
-	// still legally return the latest write that was visible exactly delta ago.
 	if IsConsistent(latestWriteBeforeDelta.Object, read.ReturnedObjects) {
 		return true
 	}

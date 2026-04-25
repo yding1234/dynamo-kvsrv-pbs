@@ -19,10 +19,17 @@ func TestPBSDemoPlotsFromRunningCluster(t *testing.T) {
 	if err := assertPBSDemoPlotExists(output.Plots.KPPath); err != nil {
 		t.Fatalf("k plot check failed: %v", err)
 	}
-	if output.Stats.ReadOK == 0 {
+	if output.Plots.SeriesConfigCSVPath == "" {
+		t.Fatalf("expected series config CSV path to be populated")
+	}
+	baseline, ok := output.Stats["observe_baseline"]
+	if !ok {
+		t.Fatalf("expected baseline scenario stats")
+	}
+	if baseline.ReadOK == 0 {
 		t.Fatalf("expected demo to record successful reads")
 	}
-	if output.Stats.WriteOK == 0 {
+	if baseline.WriteOK == 0 {
 		t.Fatalf("expected demo to record successful writes")
 	}
 

@@ -3,13 +3,14 @@ package kvsrv
 import "6.5840/kvsrv1/rpc"
 
 func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
+	// TODO: we also need to consider any write roll back if delete is true
 	if args.Delete {
 		kv.installObjects(args.Key, nil)
 		reply.Err = rpc.OK
 		return
 	}
 
-	kv.installObjects(args.Key, args.Objects)
+	kv.mergeObjects(args.Key, args.Objects)
 	reply.Err = rpc.OK
 }
 

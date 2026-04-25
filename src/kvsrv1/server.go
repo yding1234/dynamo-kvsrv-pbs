@@ -73,6 +73,10 @@ type KVServer struct {
 
 	// tracing
 	collector *kvsrv_eval.PBSCollector
+
+	// feature toggles used by the PBS demo to compare mechanisms.
+	readRepairEnabled    bool
+	hintedHandoffEnabled bool
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
@@ -97,6 +101,8 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		hints:                 make(map[string][]rpc.PutArgs),
 		hintedHandoffInterval: defaultHintedHandoffInterval,
 		collector:             kvsrv_eval.NewPBSCollector(),
+		readRepairEnabled:     true,
+		hintedHandoffEnabled:  true,
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -199,7 +205,11 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 				canonicalSiblings := rpc.CopyObjects(siblings)
 				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
 				remaining := len(prefList) - len(results)
-				go kv.finishCoordGetReadRepair(args.Key, canonicalSiblings, collectedResults, ch, remaining)
+				if kv.readRepairEnabled {
+					go kv.finishCoordGetReadRepair(args.Key, canonicalSiblings, collectedResults, ch, remaining)
+				} else {
+					go drainForwardGetResults(ch, remaining)
+				}
 
 				reply.Objects = rpc.CopyObjects(siblings)
 				reply.Err = rpc.OK
@@ -213,7 +223,11 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 			if noKeyCount >= kv.readQuorum {
 				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
 				remaining := len(prefList) - len(results)
-				go kv.finishCoordGetReadRepair(args.Key, nil, collectedResults, ch, remaining)
+				if kv.readRepairEnabled {
+					go kv.finishCoordGetReadRepair(args.Key, nil, collectedResults, ch, remaining)
+				} else {
+					go drainForwardGetResults(ch, remaining)
+				}
 				reply.Err = rpc.ErrNoKey
 				return
 			}
@@ -259,6 +273,9 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	for _, serverID := range prefList {
 		// if the server is dead, choose a handoff node from the remaining servers
 		if kv.isDead(serverID) {
+			if !kv.hintedHandoffEnabled {
+				continue
+			}
 			handoffServer, ok := kv.chooseHandoffNode(usedServers)
 			if ok {
 				usedServers[handoffServer] = true
@@ -465,7 +482,7 @@ func StartKVServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd,
 	ring := chr.MakeConsistentHashRing(numReplicas, numSectors, len(ends), nodeIDs)
 	kv := MakeKVServer(tester.ServerName(gid, srv), ring, writeQuorum, readQuorum, endsMap)
 	// start background processes
-	kv.StartAntiEntropy() // start anti-entropy process
+	kv.StartAntiEntropy()
 	kv.StartSyncMembers()
 	kv.StartMembershipFailureDetector()
 	kv.StartHintedHandoff()
@@ -619,4 +636,36 @@ func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
 	kv.mu.Unlock()
 
 	kv.refreshMerkleTreeForSector(sector)
+}
+
+// merges incoming siblings into the local replica using causal-order semantics
+func (kv *KVServer) mergeObjects(key string, incoming []rpc.Object) []rpc.Object {
+	if len(incoming) == 0 {
+		return nil
+	}
+
+	kv.mu.Lock()
+	existing := kv.kv[key]
+	merged := existing
+	changed := false
+	for _, obj := range incoming {
+		if !obj.CanBeAddedTo(merged) {
+			continue
+		}
+		merged = rpc.AddObject(merged, obj, nil)
+		changed = true
+	}
+
+	if !changed { // no change in the siblings, return the existing siblings
+		result := rpc.CopyObjects(merged)
+		kv.mu.Unlock()
+		return result
+	}
+
+	// install the new siblings
+	// TODO: check if need change to install func so that we dont need to refresh the merkle tree 
+	// TODO: and dont need to unlock the mutex here
+	kv.mu.Unlock()
+	kv.installObjects(key, merged)
+	return merged
 }

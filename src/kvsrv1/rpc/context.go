@@ -24,7 +24,7 @@ func hash(value string) string {
 func NewContext() Context {
 	return Context{
 		VC:        vclock.NewVClock(),
-		Timestamp: uint64(time.Now().Unix()),
+		Timestamp: uint64(time.Now().UnixNano()),
 		ETag:      "",
 	}
 }
@@ -32,7 +32,7 @@ func NewContext() Context {
 func NewContextFromVClock(vc vclock.VClock) Context {
 	return Context{
 		VC: vc.Copy(),
-		Timestamp: uint64(time.Now().Unix()),
+		Timestamp: uint64(time.Now().UnixNano()),
 		ETag: "",
 	}
 }
@@ -57,7 +57,7 @@ func (ctx Context) IsEqual(other Context) bool {
 func (ctx *Context) Update(node string, value string) {
 	ctx.VC = ctx.VC.Copy()
 	ctx.VC.Increment(node)
-	ctx.Timestamp = uint64(time.Now().Unix())
+	ctx.Timestamp = uint64(time.Now().UnixNano())
 	ctx.ETag = hash(value)
 }
 
@@ -69,7 +69,7 @@ func (ctx Context) Merge(other Context, newValue string) Context {
 	merged := NewContextFromVClock(ctx.VC.Copy())
 	merged.VC.Merge(other.VC)
 
-	merged.Timestamp = uint64(time.Now().Unix())
+	merged.Timestamp = uint64(time.Now().UnixNano())
 	merged.ETag = hash(newValue)
 	return merged
 }

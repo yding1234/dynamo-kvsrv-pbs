@@ -23,9 +23,11 @@ func main() {
 	sleepBetweenOps := flag.Duration("sleep", opts.SleepBetweenOps, "delay between operations")
 	numReaders := flag.Int("readers", opts.NumReaders, "number of reader goroutines")
 	readSleep := flag.Duration("read-sleep", opts.ReadSleep, "delay between reader get operations")
-	probeReads := flag.Int("probe-reads", opts.ProbeReadsPerWrite, "number of immediate probe reads after each successful write")
 	delta := flag.Duration("delta", opts.PlotConfig.Delta, "max delta value for the delta-P sweep")
+	deltaPoints := flag.Int("delta-points", opts.PlotConfig.DeltaPoints, "number of sample points along the delta axis")
 	maxK := flag.Int("k", opts.PlotConfig.K, "max K value for the K-P sweep")
+	unreliable := flag.Bool("unreliable", opts.UnreliableNetwork, "enable labrpc unreliable network (~10% drop, small per-message delay) to widen the PBS transition window")
+	longReordering := flag.Bool("long-reordering", opts.LongReordering, "enable labrpc long-reordering (~60% of replies delayed 200~2000ms); only meaningful with -unreliable")
 	simIterations := flag.Int("sim-iters", opts.PlotConfig.Iterations, "number of Monte Carlo iterations for delta-P prediction")
 	seed := flag.Int64("seed", 7, "seed for the prediction RNG")
 	flag.Parse()
@@ -40,9 +42,11 @@ func main() {
 	opts.SleepBetweenOps = *sleepBetweenOps
 	opts.NumReaders = *numReaders
 	opts.ReadSleep = *readSleep
-	opts.ProbeReadsPerWrite = *probeReads
 	opts.PlotConfig.Delta = *delta
+	opts.PlotConfig.DeltaPoints = *deltaPoints
 	opts.PlotConfig.K = *maxK
+	opts.UnreliableNetwork = *unreliable
+	opts.LongReordering = *longReordering
 	opts.PlotConfig.Iterations = *simIterations
 	opts.PlotConfig.RNG = rand.New(rand.NewSource(*seed))
 
@@ -57,17 +61,26 @@ func main() {
 	fmt.Printf("generated K-P plot: %s\n", result.Plots.KPPath)
 	fmt.Printf("generated Delta-P CSV: %s\n", result.Plots.DeltaCSVPath)
 	fmt.Printf("generated K-P CSV: %s\n", result.Plots.KPCSVPath)
+	fmt.Printf("generated series config CSV: %s\n", result.Plots.SeriesConfigCSVPath)
 	fmt.Printf("generated demo stats CSV: %s\n", result.StatsCSVPath)
-	fmt.Printf("stats: write_ok=%d write_err_version=%d write_other_err=%d read_ok=%d read_err=%d probe_read_ok=%d probe_read_err=%d refresh_ok=%d refresh_err=%d\n",
-		result.Stats.WriteOK,
-		result.Stats.WriteErrVersion,
-		result.Stats.WriteOtherErr,
-		result.Stats.ReadOK,
-		result.Stats.ReadErr,
-		result.Stats.ProbeReadOK,
-		result.Stats.ProbeReadErr,
-		result.Stats.RefreshOK,
-		result.Stats.RefreshErr,
-	)
+	for _, scenario := range kvsrv.DefaultPBSDemoScenarios() {
+		stats, ok := result.Stats[scenario.Name]
+		if !ok {
+			continue
+		}
+		fmt.Printf("stats[%s]: write_ok=%d write_err_version=%d write_quorum_retry=%d write_other_err=%d read_ok=%d read_no_key=%d read_quorum_retry=%d read_err=%d refresh_ok=%d refresh_err=%d\n",
+			scenario.Name,
+			stats.WriteOK,
+			stats.WriteErrVersion,
+			stats.WriteQuorumRetry,
+			stats.WriteOtherErr,
+			stats.ReadOK,
+			stats.ReadNoKey,
+			stats.ReadQuorumRetry,
+			stats.ReadErr,
+			stats.RefreshOK,
+			stats.RefreshErr,
+		)
+	}
 	fmt.Printf("completed in %s\n", time.Since(startedAt).Round(time.Millisecond))
 }

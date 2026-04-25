@@ -34,6 +34,7 @@ func (kv *KVServer) StartAntiEntropy() {
 			}
 		}()
 }
+
 // reconcile with the neighbor sector
 func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	// send anti-entropy request to the neighbor
@@ -42,11 +43,10 @@ func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	if !ok || root == nil {
 		return
 	}
+
 	summary := root.ToSummary()
 	
-	// All replicas index the same key-space sector locally, so the remote side
-	// must compare against the same sector ID even if it is reached via a
-	// different neighbor sector on the ring.
+
 	repairGetDiffArgs := rpc.RepairGetDiffArgs{Sector: sector, Summary: summary}
 	repairGetDiffReply := rpc.RepairGetDiffReply{}
 	
@@ -71,6 +71,7 @@ func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	kv.ApplyDiff(sector, diffKeyInfos, neighborNode)
 }
 
+
 func (kv *KVServer) RepairGetDiff(args *rpc.RepairGetDiffArgs, reply *rpc.RepairGetDiffReply) {
 	mySector := args.Sector
 	
@@ -90,6 +91,7 @@ func (kv *KVServer) RepairGetDiff(args *rpc.RepairGetDiffArgs, reply *rpc.Repair
 	// collect the difference key infos
 	for _, bucket := range diffBuckets {
 		keys := kv.GetKeysFromBucket(mySector, bucket)
+		// add the key and its siblings in the current bucket to the reply
 		for _, key := range keys {
 			reply.DiffKeyInfos = append(reply.DiffKeyInfos, rpc.KeyInfo{
 				Key: key,
@@ -117,7 +119,7 @@ func findDiffBuckets(mySummary, neighborSummary rpc.TreeSummary) []int {
 			// and there is no chance that one is internal and the other is leaf
 			if currPos < len(myHashes)/2 { // internal node
 				// check the left child
-				if !IsEmptyHash(myHashes[currPos*2+1]) { // not empty hash value
+				if !IsEmptyHash(myHashes[currPos*2+1]) {
 					queue = append(queue, currPos*2+1)
 				}
 				// check the right child
@@ -135,21 +137,16 @@ func findDiffBuckets(mySummary, neighborSummary rpc.TreeSummary) []int {
 }
 
 func (kv *KVServer) ApplyDiff(sector int, diffKeyInfos []rpc.KeyInfo, neighborNode string) {
-	// check validity of each key info by vclock
 	for _, keyInfo := range diffKeyInfos {
 		key := keyInfo.Key
-		siblings := keyInfo.Objects
-		mySiblings := kv.GetSiblings(key)
-		for _, sibling := range siblings {
-			if !sibling.CanBeAddedTo(mySiblings) {
-				continue
-			}
-			mySiblings = rpc.AddObject(mySiblings, sibling, nil) 
+		merged := kv.mergeObjects(key, keyInfo.Objects)
+		if len(merged) == 0 {
+			continue
 		}
-		kv.installObjects(key, mySiblings)
 
-		// send repair request to the neighbor node
-		kv.ends[neighborNode].Call("KVServer.RepairPut", 
-			&rpc.RepairArgs{Key: key, Objects: mySiblings, Delete: false}, &rpc.RepairReply{})
+		// repair put the merged view to the neighbor; 
+		// repairPut also uses merge semantics so the neighbor will not roll back any concurrent writes
+		kv.ends[neighborNode].Call("KVServer.RepairPut",
+			&rpc.RepairArgs{Key: key, Objects: merged, Delete: false}, &rpc.RepairReply{})
 	}
 }
