@@ -20,6 +20,7 @@ var defaultHeartbeatTimeout = 100 * time.Millisecond
 var defaultFailureTimeout = 500 * time.Millisecond
 var defaultCleanupTimeout = 1500 * time.Millisecond
 var defaultHintedHandoffInterval = 100 * time.Millisecond
+var defaultMerkleRefreshInterval = 50 * time.Millisecond
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -38,6 +39,13 @@ func traceTime(ts int64) time.Time {
 type KVServer struct {
 	mu      sync.Mutex
 	coordMu sync.Mutex
+	// merkleMu is intentionally separate from mu so that read-paths
+	// hammering kv.kv (CoordPut/ReplicaPut/CoordGet/ReplicaGet) do NOT
+	// contend with the background merkle refresher, and vice versa.
+	merkleMu sync.Mutex
+	// dirtyMu protects dirtySectors only. It must NOT be held while
+	// acquiring kv.mu or merkleMu, to avoid lock-ordering issues.
+	dirtyMu sync.Mutex
 
 	id string
 	kv map[string][]rpc.Object // key -> list of objects
@@ -52,10 +60,17 @@ type KVServer struct {
 
 	// anti-entropy
 	// merkleRoots map[int]rpc.TreeSummary // sector ID -> merkle tree summary
-	merkleRoots         map[int]*MerkleNode // sector ID -> merkle root
+	merkleRoots         map[int]*MerkleNode // sector ID -> merkle root, guarded by merkleMu
 	keysInBuckets       [][][]string        // sector ID -> bucket ID -> keys
 	antiEntropyInterval time.Duration
 	stopCh              chan struct{}
+
+	// dirtySectors is the set of sectors whose merkle tree is known to
+	// be stale. The background merkle refresher (StartMerkleRefresher)
+	// drains this set and rebuilds each sector's tree off the hot path.
+	// Guarded by dirtyMu.
+	dirtySectors            map[int]struct{}
+	merkleRefreshInterval   time.Duration
 
 	// membership
 	members           map[string]rpc.MemberInfo // server ID -> member info
@@ -103,6 +118,8 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		collector:             kvsrv_eval.NewPBSCollector(),
 		readRepairEnabled:     true,
 		hintedHandoffEnabled:  true,
+		dirtySectors:          make(map[int]struct{}),
+		merkleRefreshInterval: 0, // off by default; demo opts in via StartMerkleRefresher
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -612,14 +629,109 @@ func removeKey(keys []string, key string) []string {
 	return keys
 }
 
+// refreshMerkleTreeForSector synchronously rebuilds the merkle tree for
+// sector and publishes it. Hot paths (RepairPut / mergeObjects) should
+// prefer markSectorDirty + the background refresher to keep the merkle
+// rebuild off the critical path.
 func (kv *KVServer) refreshMerkleTreeForSector(sector int) {
 	newRoot := kv.BuildMerkleTree(sector)
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	kv.merkleMu.Lock()
 	kv.merkleRoots[sector] = newRoot
+	kv.merkleMu.Unlock()
 }
 
+// markSectorDirty records that sector's merkle tree is stale and should
+// be rebuilt by the background refresher. Cheap (one short mutex) and
+// safe to call with no other locks held.
+func (kv *KVServer) markSectorDirty(sector int) {
+	kv.dirtyMu.Lock()
+	kv.dirtySectors[sector] = struct{}{}
+	kv.dirtyMu.Unlock()
+}
+
+// drainDirtySectors atomically swaps the dirty set out and returns the
+// snapshot for the refresher to process.
+func (kv *KVServer) drainDirtySectors() []int {
+	kv.dirtyMu.Lock()
+	if len(kv.dirtySectors) == 0 {
+		kv.dirtyMu.Unlock()
+		return nil
+	}
+	sectors := make([]int, 0, len(kv.dirtySectors))
+	for s := range kv.dirtySectors {
+		sectors = append(sectors, s)
+	}
+	kv.dirtySectors = make(map[int]struct{}, len(sectors))
+	kv.dirtyMu.Unlock()
+	return sectors
+}
+
+// flushDirtyMerkle rebuilds every sector currently marked dirty and
+// publishes the new roots under merkleMu. Each rebuild snapshots data
+// briefly under kv.mu and then hashes lock-free, so writers/readers do
+// not contend with the hashing work.
+func (kv *KVServer) flushDirtyMerkle() {
+	sectors := kv.drainDirtySectors()
+	for _, sector := range sectors {
+		newRoot := kv.BuildMerkleTree(sector)
+		kv.merkleMu.Lock()
+		kv.merkleRoots[sector] = newRoot
+		kv.merkleMu.Unlock()
+	}
+}
+
+// StartMerkleRefresher launches the background goroutine that drains
+// dirtySectors and rebuilds their merkle trees every interval. Call
+// once per server. interval <= 0 disables the refresher (callers that
+// want synchronous merkle rebuild on every install should leave this
+// off and rely on installObjects's eager refresh path).
+func (kv *KVServer) StartMerkleRefresher(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	kv.merkleRefreshInterval = interval
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				kv.flushDirtyMerkle()
+			case <-kv.stopCh:
+				// final flush so anti-entropy / shutdown paths see the
+				// freshest tree before we exit.
+				kv.flushDirtyMerkle()
+				return
+			}
+		}
+	}()
+}
+
+// installObjects installs `objects` for `key` and synchronously refreshes
+// the merkle tree for the affected sector. Use this for callers that
+// require an up-to-date merkle root immediately after the install
+// (bootstrap, tests, etc.). Hot repair / merge paths should use
+// installObjectsLazy instead.
 func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
+	sector, bucket := kv.installObjectsCommon(key, objects)
+	kv.refreshMerkleTreeForSector(sector)
+	_ = bucket
+}
+
+// installObjectsLazy installs objects exactly like installObjects but
+// only marks the sector dirty. The merkle tree is rebuilt later by the
+// background refresher (StartMerkleRefresher). This decouples the
+// repair-driven write path from the cost of re-hashing the whole
+// sector and is what lets read_repair scale on the demo's hot path.
+func (kv *KVServer) installObjectsLazy(key string, objects []rpc.Object) {
+	sector, _ := kv.installObjectsCommon(key, objects)
+	kv.markSectorDirty(sector)
+}
+
+// installObjectsCommon performs the shared kv.kv / keysInBuckets update
+// under kv.mu and returns the (sector, bucket) it touched so that the
+// caller can choose between sync and lazy merkle refresh strategies.
+func (kv *KVServer) installObjectsCommon(key string, objects []rpc.Object) (int, int) {
 	sector, bucket := kv.ring.GetLocation(key)
 
 	kv.mu.Lock()
@@ -627,8 +739,7 @@ func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
 		delete(kv.kv, key)
 		kv.keysInBuckets[sector][bucket] = removeKey(kv.keysInBuckets[sector][bucket], key)
 		kv.mu.Unlock()
-		kv.refreshMerkleTreeForSector(sector)
-		return
+		return sector, bucket
 	}
 
 	_, existed := kv.kv[key]
@@ -637,12 +748,28 @@ func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
 		kv.keysInBuckets[sector][bucket] = appendUniqueKey(kv.keysInBuckets[sector][bucket], key)
 	}
 	kv.mu.Unlock()
-
-	kv.refreshMerkleTreeForSector(sector)
+	return sector, bucket
 }
 
-// merges incoming siblings into the local replica using causal-order semantics
+// mergeObjects merges `incoming` into the local replica using
+// causal-order semantics and returns the resulting siblings list.
+// Used by anti-entropy's ApplyDiff which then forwards `merged` to a
+// neighbor. Repair-only callers that don't need the result should use
+// mergeObjectsAndDiscard to avoid the CopyObjects allocation in the
+// no-change path.
 func (kv *KVServer) mergeObjects(key string, incoming []rpc.Object) []rpc.Object {
+	return kv.mergeObjectsCore(key, incoming, true)
+}
+
+// mergeObjectsAndDiscard is the no-return variant. Skips the
+// CopyObjects allocation when nothing changed and never installs/copies
+// into a return value. Used by RepairPut where the caller only needs
+// to know success/failure.
+func (kv *KVServer) mergeObjectsAndDiscard(key string, incoming []rpc.Object) {
+	kv.mergeObjectsCore(key, incoming, false)
+}
+
+func (kv *KVServer) mergeObjectsCore(key string, incoming []rpc.Object, returnSiblings bool) []rpc.Object {
 	if len(incoming) == 0 {
 		return nil
 	}
@@ -659,16 +786,28 @@ func (kv *KVServer) mergeObjects(key string, incoming []rpc.Object) []rpc.Object
 		changed = true
 	}
 
-	if !changed { // no change in the siblings, return the existing siblings
-		result := rpc.CopyObjects(merged)
+	if !changed {
+		// No-op merge. Skip the allocation entirely if the caller
+		// doesn't want the siblings back; under read_repair this
+		// is the common case (most reads find replicas already
+		// holding the canonical sibling) and that copy alone was
+		// non-trivial cluster-wide.
+		var result []rpc.Object
+		if returnSiblings {
+			result = rpc.CopyObjects(merged)
+		}
 		kv.mu.Unlock()
 		return result
 	}
 
-	// install the new siblings
-	// TODO: check if need change to install func so that we dont need to refresh the merkle tree 
-	// TODO: and dont need to unlock the mutex here
 	kv.mu.Unlock()
-	kv.installObjects(key, merged)
-	return merged
+	// Lazy install: bump kv.kv now, defer the merkle rebuild so the
+	// hot read-repair / anti-entropy path doesn't pay the per-call
+	// SHA-256 sweep over the whole sector. Ordering with kv.mu is
+	// safe because installObjectsLazy reacquires kv.mu internally.
+	kv.installObjectsLazy(key, merged)
+	if returnSiblings {
+		return merged
+	}
+	return nil
 }

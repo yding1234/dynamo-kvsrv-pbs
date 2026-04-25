@@ -152,25 +152,62 @@ func (node *MerkleNode) IsInternal() bool {
     return node.Left != nil && node.Right != nil
 }
 
+// sectorSnapshot is a point-in-time copy of every bucket's key list and
+// every key's siblings for a single sector, taken under kv.mu so the
+// subsequent SHA-256 sweep can run lock-free.
+type sectorSnapshot struct {
+	keysPerBucket [][]string
+	siblings      map[string][]rpc.Object
+}
+
+// snapshotSector copies enough state under one short kv.mu acquire that
+// BuildMerkleTree can hash the rest of the sector without touching the
+// data lock. This is the change that actually unblocks writers when
+// read_repair fires thousands of merkle rebuilds per second.
+func (kv *KVServer) snapshotSector(sector int) sectorSnapshot {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	bucketKeys := kv.keysInBuckets[sector]
+	snap := sectorSnapshot{
+		keysPerBucket: make([][]string, len(bucketKeys)),
+		siblings:      make(map[string][]rpc.Object),
+	}
+	for b, bucket := range bucketKeys {
+		keys := make([]string, len(bucket))
+		copy(keys, bucket)
+		snap.keysPerBucket[b] = keys
+		for _, k := range bucket {
+			snap.siblings[k] = rpc.CopyObjects(kv.kv[k])
+		}
+	}
+	return snap
+}
+
 // Build one fixed leaf per bucket so every replica produces the same tree shape.
 func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
-	// build the leaves of the merkle tree
-	leaves := make([]*MerkleNode, 0, kv.ring.BucketsPerSector())
-	for bucket := 0; bucket < kv.ring.BucketsPerSector(); bucket++ {
-		leaves = append(leaves, kv.MakeMerkleLeaf(sector, bucket))
+	snap := kv.snapshotSector(sector)
+	return buildMerkleTreeFromSnapshot(sector, snap)
+}
+
+// buildMerkleTreeFromSnapshot mirrors the previous BuildMerkleTree
+// shape but consumes the pre-fetched snapshot instead of pulling each
+// leaf's data through GetSiblings/GetKeysFromBucket (which would each
+// take kv.mu independently and fight the writer path).
+func buildMerkleTreeFromSnapshot(sector int, snap sectorSnapshot) *MerkleNode {
+	leaves := make([]*MerkleNode, 0, len(snap.keysPerBucket))
+	for bucket := 0; bucket < len(snap.keysPerBucket); bucket++ {
+		leaves = append(leaves, makeMerkleLeafFromSnapshot(sector, bucket, snap))
 	}
 
-	// build the internal nodes and root of the merkle tree
 	for len(leaves) > 1 {
 		upperNodes := make([]*MerkleNode, 0, len(leaves)/2+1)
 		i := 0
-		for ; i + 1 < len(leaves); i += 2 {
-			left := leaves[i]
-			right := leaves[i+1]
-			upperNodes = append(upperNodes, kv.MakeMerkleInternalNode(left, right))
+		for ; i+1 < len(leaves); i += 2 {
+			upperNodes = append(upperNodes, makeMerkleInternalNodeFromSnapshot(leaves[i], leaves[i+1]))
 		}
-		if i + 1 == len(leaves) {
-			upperNodes = append(upperNodes, kv.MakeMerkleInternalNode(leaves[i], nil))
+		if i+1 == len(leaves) {
+			upperNodes = append(upperNodes, makeMerkleInternalNodeFromSnapshot(leaves[i], nil))
 		}
 		leaves = upperNodes
 	}
@@ -178,25 +215,79 @@ func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
 	return leaves[0]
 }
 
+func makeMerkleLeafFromSnapshot(sector, bucket int, snap sectorSnapshot) *MerkleNode {
+	h := sha256.New()
+	keys := snap.keysPerBucket[bucket]
+	if !slices.IsSorted(keys) {
+		// snap.keysPerBucket[bucket] was copied in snapshotSector so
+		// sorting it in place won't disturb the live state.
+		slices.Sort(keys)
+	}
+	writeUint64(h, uint64(len(keys)))
+	for _, key := range keys {
+		writeKVPair(h, key, snap.siblings[key])
+	}
+	writeString(h, "empty")
+	writeString(h, "empty")
+	return &MerkleNode{
+		Level:  0,
+		Sector: sector,
+		Bucket: bucket,
+		Hash:   finalizeHash(h),
+	}
+}
+
+func makeMerkleInternalNodeFromSnapshot(left, right *MerkleNode) *MerkleNode {
+	h := sha256.New()
+	if left == nil {
+		writeString(h, "empty")
+	} else {
+		writeBytes(h, left.Hash[:])
+	}
+	if right == nil {
+		writeString(h, "empty")
+	} else {
+		writeBytes(h, right.Hash[:])
+	}
+	node := &MerkleNode{
+		Level:  left.Level + 1,
+		Sector: left.Sector,
+		Bucket: -1,
+		Left:   left,
+		Right:  right,
+		Hash:   finalizeHash(h),
+	}
+	if left != nil {
+		left.Parent = node
+	}
+	if right != nil {
+		right.Parent = node
+	}
+	return node
+}
+
 func (kv *KVServer) BuildAllMerkleTrees() {
-	for sector, _ := range kv.keysInBuckets {
-		kv.merkleRoots[sector] = kv.BuildMerkleTree(sector)
+	for sector := range kv.keysInBuckets {
+		newRoot := kv.BuildMerkleTree(sector)
+		kv.merkleMu.Lock()
+		kv.merkleRoots[sector] = newRoot
+		kv.merkleMu.Unlock()
 	}
 }
 
 func (kv *KVServer) StartRefreshMerkleTrees(interval time.Duration) {
-    go func() {
+	go func() {
 		ticker := time.NewTicker(interval)
-        defer ticker.Stop()
-        for {
-            select {
-            case <-ticker.C:
-                kv.refreshMerkleTrees()
-            case <-kv.stopCh:
-                return
-            }
-        }
-    }()
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				kv.refreshMerkleTrees()
+			case <-kv.stopCh:
+				return
+			}
+		}
+	}()
 }
 
 // TODO: Incremental update of the merkle tree instead of rebuilding the whole tree
@@ -205,15 +296,15 @@ func (kv *KVServer) refreshMerkleTrees() {
 	// TODO: jitter the rebuild time to avoid synchronization
 	for sector := 0; sector < kv.ring.NumSectors(); sector++ {
 		newRoot := kv.BuildMerkleTree(sector)
-		kv.mu.Lock()
+		kv.merkleMu.Lock()
 		kv.merkleRoots[sector] = newRoot
-		kv.mu.Unlock()
+		kv.merkleMu.Unlock()
 	}
 }
 
 func (kv *KVServer) GetMerkleRoot(sector int) (*MerkleNode, bool) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	kv.merkleMu.Lock()
+	defer kv.merkleMu.Unlock()
 	root, ok := kv.merkleRoots[sector]
 	return root, ok
 }

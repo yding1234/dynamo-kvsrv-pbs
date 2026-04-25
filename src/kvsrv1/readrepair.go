@@ -5,12 +5,18 @@ import "6.5840/kvsrv1/rpc"
 func (kv *KVServer) RepairPut(args *rpc.RepairArgs, reply *rpc.RepairReply) {
 	// TODO: we also need to consider any write roll back if delete is true
 	if args.Delete {
+		// Delete keeps the eager-refresh path: deletes are rare and
+		// callers (tests, manual repair) tend to assert the merkle
+		// state immediately afterwards.
 		kv.installObjects(args.Key, nil)
 		reply.Err = rpc.OK
 		return
 	}
 
-	kv.mergeObjects(args.Key, args.Objects)
+	// Hot path: discard siblings so we skip the CopyObjects when the
+	// replica is already in sync, and let the merkle tree refresh
+	// happen on the background refresher tick instead of inline.
+	kv.mergeObjectsAndDiscard(args.Key, args.Objects)
 	reply.Err = rpc.OK
 }
 

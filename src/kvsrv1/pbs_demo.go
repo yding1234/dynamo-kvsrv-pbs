@@ -53,8 +53,21 @@ type PBSDemoScenario struct {
 }
 
 type PBSDemoOptions struct {
-	OutputDir        string
-	Key              string
+	OutputDir string
+	// Key is kept for backwards compatibility. When Keys is empty, the demo
+	// runs against this single key (so existing single-key configs keep
+	// working). When Keys is non-empty, Key is ignored.
+	Key string
+	// Keys is the working set the demo cycles through. With multiple keys,
+	// each writer/reader picks a key uniformly at random per request, which:
+	//   * spreads load across distinct preference lists (different keys hash
+	//     to different replica triples), exercising more of the ring;
+	//   * lets per-key VC chains evolve independently, so cross-key
+	//     causality doesn't artificially inflate sibling lists;
+	//   * makes per-coordinator pick distribution more uniform across the
+	//     entire cluster (not just one prefList of N nodes).
+	// If empty, defaults to []string{Key}.
+	Keys             []string
 	WorkloadDuration time.Duration
 	NumWriters       int
 	SleepBetweenOps  time.Duration
@@ -88,25 +101,25 @@ func DefaultPBSDemoOptions() PBSDemoOptions {
 	return PBSDemoOptions{
 		OutputDir:        ".",
 		Key:              "pbs-demo-key",
-		WorkloadDuration: 2 * time.Second,
+		WorkloadDuration: 10 * time.Second,
 		NumWriters:       1,
-		SleepBetweenOps:  1 * time.Millisecond,
-		NumReaders:       10,
-		ReadSleep:        2 * time.Millisecond,
+		SleepBetweenOps:  2 * time.Millisecond,
+		NumReaders:       50,
+		ReadSleep:        5 * time.Millisecond,
 		SleepJitterRatio: 0.5, // ±50% uniform jitter to break lock-step
 
 		// ProbeReadsPerWrite: 0,
 		NumNodes:          5,
-		UnreliableNetwork: false,
-		LongReordering:    false,
+		UnreliableNetwork: true,
+		LongReordering:    true,
 		RandomCoordinator: true,
 		PlotConfig: kvsrv_eval.SimulationConfig{
 			NumReplicas:  3,
 			ReadQuorum:   1,
 			WriteQuorum:  1,
-			Delta:        10 * time.Millisecond,
+			Delta:        20 * time.Millisecond,
 			DeltaPoints:  50, // number of sample points along the delta axis
-			K:            5,
+			K:            6,
 			Iterations:   5000, // number of Monte Carlo iterations for delta-P prediction
 			RNG:          rand.New(rand.NewSource(7)),
 			YMin:         0,    // 0 = auto-fit
@@ -163,6 +176,14 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	}
 	if opts.Key == "" {
 		opts.Key = "pbs-demo-key"
+	}
+	if len(opts.Keys) == 0 {
+		opts.Keys = []string{opts.Key}
+	}
+	for i, k := range opts.Keys {
+		if k == "" {
+			return PBSDemoResult{}, fmt.Errorf("opts.Keys[%d] is empty", i)
+		}
 	}
 	if opts.WorkloadDuration <= 0 {
 		return PBSDemoResult{}, fmt.Errorf("WorkloadDuration must be > 0")
@@ -295,57 +316,82 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	for _, server := range servers {
 		server.readRepairEnabled = scenario.EnableReadRepair
 		server.hintedHandoffEnabled = scenario.EnableHintedHandoff
+		// Always start the merkle refresher on the demo path so that
+		// repair-driven merges (RepairPut, ApplyDiff) don't pay an
+		// inline sector-wide SHA-256 sweep under kv.mu - that sweep
+		// is what serialised the writer behind reader-driven repair
+		// in the read_repair scenario. Tests don't start it because
+		// they want synchronous merkle updates after installObjects.
+		server.StartMerkleRefresher(defaultMerkleRefreshInterval)
 		if scenario.EnableAntiEntropy {
 			server.StartAntiEntropy()
 		}
 		if scenario.EnableHintedHandoff {
 			server.StartMembershipFailureDetector()
+			server.StartSyncMembers()
 			server.StartHintedHandoff()
 		}
 	}
 
-	// Build the candidate coordinator pool. With RandomCoordinator we draw
-	// uniformly from the key's preference list per request (PBS-paper style:
-	// the client load-balances across the N replicas, so no single node gets
-	// a "coordinator-as-replica" local advantage). Otherwise we keep the
-	// legacy behavior of always sending to ring.GetCoordinator(key).
-	var coordinatorCandidates []*KVServer
-	if opts.RandomCoordinator {
-		prefList := ring.GetPreferenceList(opts.Key)
-		coordinatorCandidates = make([]*KVServer, 0, len(prefList))
-		for _, id := range prefList {
-			if s := servers[id]; s != nil {
-				coordinatorCandidates = append(coordinatorCandidates, s)
+	// Build the candidate coordinator pool PER KEY. Each key hashes to its
+	// own preference list (potentially a different N-tuple of nodes), so
+	// random-coordinator selection has to be scoped per key. With multiple
+	// keys this also spreads load across the whole ring instead of just one
+	// prefList.
+	candidatesByKey := make(map[string][]*KVServer, len(opts.Keys))
+	for _, key := range opts.Keys {
+		var cands []*KVServer
+		if opts.RandomCoordinator {
+			prefList := ring.GetPreferenceList(key)
+			cands = make([]*KVServer, 0, len(prefList))
+			for _, id := range prefList {
+				if s := servers[id]; s != nil {
+					cands = append(cands, s)
+				}
+			}
+		} else {
+			coordinatorID := ring.GetCoordinator(key)
+			if s := servers[coordinatorID]; s != nil {
+				cands = []*KVServer{s}
 			}
 		}
-	} else {
-		coordinatorID := ring.GetCoordinator(opts.Key)
-		if s := servers[coordinatorID]; s != nil {
-			coordinatorCandidates = []*KVServer{s}
+		if len(cands) == 0 {
+			return nil, PBSDemoStats{}, fmt.Errorf("no coordinator candidates for key %q", key)
 		}
+		candidatesByKey[key] = cands
 	}
-	if len(coordinatorCandidates) == 0 {
-		return nil, PBSDemoStats{}, fmt.Errorf("no coordinator candidates for key %q", opts.Key)
-	}
-	// pickCounts lets us print, at scenario end, how often each candidate
-	// actually served as coordinator. Useful for verifying the random branch
-	// really is rotating across the preference list.
+	// pickCounts lets us print, at scenario end, how often each server got
+	// picked as coordinator (aggregated across keys). With many keys this
+	// should be roughly uniform across all NumNodes; with one key only the
+	// one prefList shows up.
 	var pickMu sync.Mutex
-	pickCounts := make(map[string]int64, len(coordinatorCandidates))
-	pickCoordinator := func(rng *rand.Rand) *KVServer {
+	pickCounts := make(map[string]int64)
+	pickCoordinator := func(rng *rand.Rand, key string) *KVServer {
+		cands := candidatesByKey[key]
 		var s *KVServer
-		if len(coordinatorCandidates) == 1 {
-			s = coordinatorCandidates[0]
+		if len(cands) == 1 {
+			s = cands[0]
 		} else {
-			s = coordinatorCandidates[rng.Intn(len(coordinatorCandidates))]
+			s = cands[rng.Intn(len(cands))]
 		}
 		pickMu.Lock()
 		pickCounts[s.id]++
 		pickMu.Unlock()
 		return s
 	}
+	pickKey := func(rng *rand.Rand) string {
+		if len(opts.Keys) == 1 {
+			return opts.Keys[0]
+		}
+		return opts.Keys[rng.Intn(len(opts.Keys))]
+	}
 
-	if err := configurePBSDemoScenarioFailure(opts.Key, ring, servers, scenario); err != nil {
+	// Failure mode is configured against the first key for backwards
+	// compatibility with the single-key demo. With multi-key workloads the
+	// dead replica may or may not be in the prefList of the *other* keys,
+	// which is fine: it just means hinted-handoff scenarios exercise a
+	// subset of the working set rather than all of it.
+	if err := configurePBSDemoScenarioFailure(opts.Keys[0], ring, servers, scenario); err != nil {
 		return nil, PBSDemoStats{}, err
 	}
 
@@ -363,13 +409,17 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	var refreshOK atomic.Int64
 	var refreshErr atomic.Int64
 
-	// Write the initial value, always retry on transient errors so the
-	// rest of the workload always has a key to operate on. Use the first
-	// candidate deterministically for the bootstrap; randomization kicks in
-	// once the steady-state workload starts.
-	initialCtx, err := writeInitialValue(coordinatorCandidates[0], opts.Key)
-	if err != nil {
-		return nil, PBSDemoStats{}, fmt.Errorf("initial value write failed: %w", err)
+	// Write the initial value for each key, always retry on transient
+	// errors so the rest of the workload always has every key to operate
+	// on. Use the first candidate deterministically for the bootstrap;
+	// randomization kicks in once the steady-state workload starts.
+	initialCtxByKey := make(map[string]rpc.Context, len(opts.Keys))
+	for _, key := range opts.Keys {
+		ctx, err := writeInitialValue(candidatesByKey[key][0], key)
+		if err != nil {
+			return nil, PBSDemoStats{}, fmt.Errorf("initial value write for key %q failed: %w", key, err)
+		}
+		initialCtxByKey[key] = ctx
 	}
 
 	// set up the workers
@@ -400,7 +450,8 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 			// different worker IDs get independent jitter sequences.
 			rng := rand.New(rand.NewSource(workerSeed(scenario.Name, "reader", readerID)))
 			for !stopWorkers.Load() {
-				softErr, hardErr := demoGet(pickCoordinator(rng), opts.Key)
+				key := pickKey(rng)
+				softErr, hardErr := demoGet(pickCoordinator(rng, key), key)
 				if hardErr != nil {
 					readErr.Add(1)
 					reportFatalErr(fmt.Errorf("reader %d: %w", readerID, hardErr))
@@ -429,25 +480,33 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 		go func(writerID int) {
 			defer writersWG.Done()
 
-			writerCtx := initialCtx.Copy()                                      // start with the initial context
-			writerLabel := fmt.Sprintf("%s-writer-%d", scenario.Name, writerID) // TODO: experiment with multiple writers and multiple keys
+			// One VC chain per (writer, key). VCs are scoped to a key in
+			// dynamo, so writes to different keys evolve independent
+			// chains; reusing the same writerLabel across keys is safe
+			// (the label only collides within the same key's VC).
+			writerCtxByKey := make(map[string]rpc.Context, len(opts.Keys))
+			for _, key := range opts.Keys {
+				writerCtxByKey[key] = initialCtxByKey[key].Copy()
+			}
+			writerLabel := fmt.Sprintf("%s-writer-%d", scenario.Name, writerID)
 			rng := rand.New(rand.NewSource(workerSeed(scenario.Name, "writer", writerID)))
 
 			for i := 0; !stopWorkers.Load(); i++ {
-				value := fmt.Sprintf("%s-writer-%02d-value-%02d", scenario.Name, writerID, i) // TODO: experiment with multiple values
+				key := pickKey(rng)
+				value := fmt.Sprintf("%s-writer-%02d-key-%s-value-%02d", scenario.Name, writerID, key, i)
 				for !stopWorkers.Load() {
-					nextCtx := writerCtx.Copy()
+					nextCtx := writerCtxByKey[key].Copy()
 					nextCtx.Update(writerLabel, value)
-					putErr, committedCtx, err := demoPut(pickCoordinator(rng), opts.Key, value, nextCtx)
+					putErr, committedCtx, err := demoPut(pickCoordinator(rng, key), key, value, nextCtx)
 					if err != nil {
-						reportFatalErr(fmt.Errorf("writer %d iteration %d: %w", writerID, i, err))
+						reportFatalErr(fmt.Errorf("writer %d iteration %d key %q: %w", writerID, i, key, err))
 						return
 					}
 
 					switch putErr {
 					case rpc.OK:
 						writeOK.Add(1)
-						writerCtx = committedCtx
+						writerCtxByKey[key] = committedCtx
 						// for probe := 0; probe < opts.ProbeReadsPerWrite; probe++ {
 						// 	softErr, hardErr := demoGet(coordinator, opts.Key)
 						// 	if hardErr != nil {
@@ -465,10 +524,10 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 						goto nextWrite
 					case rpc.ErrVersion:
 						writeErrVersion.Add(1)
-						latestCtx, ok, err := demoGetLatestContext(pickCoordinator(rng), opts.Key) // TODO: experiment with multiple keys
+						latestCtx, ok, err := demoGetLatestContext(pickCoordinator(rng, key), key)
 						if err != nil {
 							refreshErr.Add(1)
-							reportFatalErr(fmt.Errorf("writer %d iteration %d refresh failed: %w", writerID, i, err))
+							reportFatalErr(fmt.Errorf("writer %d iteration %d key %q refresh failed: %w", writerID, i, key, err))
 							return
 						}
 						if !ok {
@@ -478,17 +537,40 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 							continue
 						}
 						refreshOK.Add(1)
-						writerCtx = latestCtx
+						writerCtxByKey[key] = latestCtx
 						continue
 					case rpc.ErrWriteQuorumNotMet, rpc.ErrNoKey:
 						// Transient under unreliable networks: drops/timeouts can
 						// prevent meeting quorum or leave a fresh replica without
-						// the key briefly. Just retry the same put.
+						// the key briefly.
+						//
+						// Subtle hazard: a "quorum not met" reply may hide a
+						// PARTIAL success - one replica installed our stamped
+						// Object.Context (with this coord's +1) before its ack
+						// got dropped. With read-repair on, that hidden coord
+						// stamp gets propagated to every replica on the next
+						// reader's CoordGet. Our next BaseContext (still missing
+						// the leaked stamp) will then be Before every replica's
+						// sibling and CoordPut will return ErrVersion to us,
+						// which is exactly the spurious write_err_version we see
+						// under read_repair. Refresh writerCtx defensively here
+						// so the leaked stamp is absorbed before the retry
+						// instead of detected after the fact.
 						writeQuorumRetry.Add(1)
+						latestCtx, ok, err := demoGetLatestContext(pickCoordinator(rng, key), key)
+						if err != nil {
+							refreshErr.Add(1)
+							reportFatalErr(fmt.Errorf("writer %d iteration %d key %q quorum-fail refresh failed: %w", writerID, i, key, err))
+							return
+						}
+						if ok {
+							refreshOK.Add(1)
+							writerCtxByKey[key] = latestCtx
+						}
 						continue
 					default:
 						writeOtherErr.Add(1)
-						reportFatalErr(fmt.Errorf("writer %d iteration %d put failed: %v", writerID, i, putErr))
+						reportFatalErr(fmt.Errorf("writer %d iteration %d key %q put failed: %v", writerID, i, key, putErr))
 						return
 					}
 				}
@@ -506,23 +588,31 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	default:
 	}
 
-	// Print which servers actually got picked as coordinator. With
-	// RandomCoordinator=true the counts should be roughly uniform across
-	// the key's preference list; with RandomCoordinator=false you should
-	// see all picks land on the single ring.GetCoordinator(key) node.
+	// Print which servers actually got picked as coordinator (aggregated
+	// across all keys). With RandomCoordinator=true and a single key the
+	// counts should be roughly uniform across that key's prefList; with
+	// many keys they should be roughly uniform across the whole cluster
+	// (each key's prefList samples a different N-tuple of nodes).
 	pickMu.Lock()
-	keys := make([]string, 0, len(pickCounts))
+	pickIDs := make([]string, 0, len(pickCounts))
 	for id := range pickCounts {
-		keys = append(keys, id)
+		pickIDs = append(pickIDs, id)
 	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, id := range keys {
+	sort.Strings(pickIDs)
+	parts := make([]string, 0, len(pickIDs))
+	for _, id := range pickIDs {
 		parts = append(parts, fmt.Sprintf("%s=%d", id, pickCounts[id]))
 	}
 	pickMu.Unlock()
-	fmt.Printf("[pbs-demo] scenario=%s random=%v coordinator picks: %s (preference list = %v)\n",
-		scenario.Name, opts.RandomCoordinator, strings.Join(parts, " "), ring.GetPreferenceList(opts.Key))
+	fmt.Printf("[pbs-demo] scenario=%s random=%v num_keys=%d coordinator picks: %s\n",
+		scenario.Name, opts.RandomCoordinator, len(opts.Keys), strings.Join(parts, " "))
+	if len(opts.Keys) <= 4 {
+		// For small key sets, also dump per-key prefLists so it's easy to
+		// eyeball whether the picks line up with each key's replicas.
+		for _, key := range opts.Keys {
+			fmt.Printf("[pbs-demo]   key=%q prefList=%v\n", key, ring.GetPreferenceList(key))
+		}
+	}
 
 	// wait for the hinted handoff and anti-entropy to complete
 	if scenario.EnableHintedHandoff {
