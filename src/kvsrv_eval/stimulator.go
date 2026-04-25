@@ -19,6 +19,16 @@ type SimulationConfig struct {
 	Iterations  int        // number of trials to run
 	RNG         *rand.Rand // random number generator
 
+	// Plot rendering knobs (orthogonal to the WARS simulator itself).
+	// YMin / YMax control the main delta_p.png and k_p.png y-axis bounds.
+	//   <= 0  -> auto-fit (predicted + observed for delta, observed-only for k).
+	YMin float64
+	YMax float64
+	// EmitZoomPlot, when true, additionally writes delta_p_zoom.png and
+	// k_p_zoom.png whose y-axis is auto-fit to observed series only,
+	// stretching the high-P region where read-repair / anti-entropy /
+	// hinted-handoff curves live.
+	EmitZoomPlot bool
 }
 
 type SimulationResult struct {

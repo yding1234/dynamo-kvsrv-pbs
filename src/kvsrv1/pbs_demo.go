@@ -58,6 +58,11 @@ type PBSDemoOptions struct {
 	SleepBetweenOps    time.Duration
 	NumReaders         int
 	ReadSleep          time.Duration
+	// SleepJitterRatio adds uniform jitter to writer/reader sleep so calls
+	// don't land in lock-step. Each sleep is drawn from
+	// [base*(1-ratio), base*(1+ratio)]. 0 disables jitter; values >1 are
+	// clamped to 1 (so the lower bound never goes negative).
+	SleepJitterRatio float64
 	// ProbeReadsPerWrite int
 	NumNodes           int
 	// UnreliableNetwork enables labrpc's reliable=false mode: ~10% request
@@ -76,23 +81,28 @@ func DefaultPBSDemoOptions() PBSDemoOptions {
 		OutputDir:          ".",
 		Key:                "pbs-demo-key",
 		WorkloadIterations: 300,
-		NumWriters:         8,
-		SleepBetweenOps:    4 * time.Millisecond,
-		NumReaders:         32,
+		NumWriters:         1,
+		SleepBetweenOps:    1 * time.Millisecond,
+		NumReaders:         10,
 		ReadSleep:          2 * time.Millisecond,
+		SleepJitterRatio:   0.5, // ±50% uniform jitter to break lock-step
+
 		// ProbeReadsPerWrite: 0,
-		NumNodes:           10,
+		NumNodes:           5,
 		UnreliableNetwork:  false,
 		LongReordering:     false,
 		PlotConfig: kvsrv_eval.SimulationConfig{
-			NumReplicas: 3,
-			ReadQuorum:  1,
-			WriteQuorum: 1,
-			Delta:       10 * time.Millisecond,
-			DeltaPoints: 50, // number of sample points along the delta axis
-			K:           5,
-			Iterations:  5000, // number of Monte Carlo iterations for delta-P prediction
-			RNG:         rand.New(rand.NewSource(7)),
+			NumReplicas:  3,
+			ReadQuorum:   1,
+			WriteQuorum:  1,
+			Delta:        10 * time.Millisecond,
+			DeltaPoints:  50, // number of sample points along the delta axis
+			K:            5,
+			Iterations:   5000, // number of Monte Carlo iterations for delta-P prediction
+			RNG:          rand.New(rand.NewSource(7)),
+			YMin:         0,    // 0 = auto-fit
+			YMax:         0,    // 0 = 1.0
+			EmitZoomPlot: true, // also emit delta_p_zoom.png / k_p_zoom.png
 		},
 		Scenarios: DefaultPBSDemoScenarios(),
 	}
@@ -229,12 +239,28 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	if err := assertPBSDemoPlotExists(output.KPPath); err != nil {
 		return PBSDemoResult{}, err
 	}
+	if output.DeltaPZoomPath != "" {
+		if err := assertPBSDemoPlotExists(output.DeltaPZoomPath); err != nil {
+			return PBSDemoResult{}, err
+		}
+	}
+	if output.KPZoomPath != "" {
+		if err := assertPBSDemoPlotExists(output.KPZoomPath); err != nil {
+			return PBSDemoResult{}, err
+		}
+	}
 
 	output.DeltaPPath, _ = filepath.Abs(output.DeltaPPath)
 	output.KPPath, _ = filepath.Abs(output.KPPath)
 	output.DeltaCSVPath, _ = filepath.Abs(output.DeltaCSVPath)
 	output.KPCSVPath, _ = filepath.Abs(output.KPCSVPath)
 	output.SeriesConfigCSVPath, _ = filepath.Abs(output.SeriesConfigCSVPath)
+	if output.DeltaPZoomPath != "" {
+		output.DeltaPZoomPath, _ = filepath.Abs(output.DeltaPZoomPath)
+	}
+	if output.KPZoomPath != "" {
+		output.KPZoomPath, _ = filepath.Abs(output.KPZoomPath)
+	}
 	statsCSVPath := filepath.Join(opts.OutputDir, "pbs_demo_stats.csv")
 	if err := writePBSDemoStatsCSV(statsCSVPath, statsByScenario); err != nil {
 		return PBSDemoResult{}, err
@@ -314,6 +340,10 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 		readersWG.Add(1)
 		go func(readerID int) {
 			defer readersWG.Done()
+			// per-goroutine RNG to avoid lock contention on the global rand;
+			// seed mixes scenario name + role + id so different scenarios and
+			// different worker IDs get independent jitter sequences.
+			rng := rand.New(rand.NewSource(workerSeed(scenario.Name, "reader", readerID)))
 			for !stopWorkers.Load() {
 				softErr, hardErr := demoGet(coordinator, opts.Key)
 				if hardErr != nil {
@@ -333,9 +363,7 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 					reportFatalErr(fmt.Errorf("reader %d: unexpected reply %v", readerID, softErr))
 					return
 				}
-				if opts.ReadSleep > 0 {
-					time.Sleep(opts.ReadSleep)
-				} // TODO: randomize the sleep time
+				jitteredSleep(rng, opts.ReadSleep, opts.SleepJitterRatio)
 			}
 		}(readerID)
 	}
@@ -348,7 +376,8 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 
 			writerCtx := initialCtx.Copy() // start with the initial context
 			writerLabel := fmt.Sprintf("%s-writer-%d", scenario.Name, writerID) // TODO: experiment with multiple writers and multiple keys
-			
+			rng := rand.New(rand.NewSource(workerSeed(scenario.Name, "writer", writerID)))
+
 			for i := 0; i < opts.WorkloadIterations && !stopWorkers.Load(); i++ {
 				value := fmt.Sprintf("%s-writer-%02d-value-%02d", scenario.Name, writerID, i) // TODO: experiment with multiple values
 				for !stopWorkers.Load() {
@@ -377,9 +406,7 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 					// 		probeReadErr.Add(1)
 					// 	}
 					// }
-					if opts.SleepBetweenOps > 0 {
-						time.Sleep(opts.SleepBetweenOps) // TODO: randomize the sleep time
-					}
+					jitteredSleep(rng, opts.SleepBetweenOps, opts.SleepJitterRatio)
 					goto nextWrite
 				case rpc.ErrVersion:
 					writeErrVersion.Add(1)
@@ -577,6 +604,48 @@ func nextDemoContext(ctx rpc.Context, writerLabel string) rpc.Context {
 	next.VC.SetVersion(writerLabel, next.VC.GetVersion(writerLabel)+1)
 	next.Timestamp++
 	return next
+}
+
+// jitteredSleep sleeps for a duration drawn uniformly from
+// [base*(1-ratio), base*(1+ratio)]. ratio<=0 falls back to base; ratio>=1 is
+// clamped so the lower bound stays non-negative. base<=0 returns immediately.
+func jitteredSleep(rng *rand.Rand, base time.Duration, ratio float64) {
+	if base <= 0 {
+		return
+	}
+	if ratio <= 0 {
+		time.Sleep(base)
+		return
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	// scale in [1-ratio, 1+ratio]
+	scale := 1 + ratio*(2*rng.Float64()-1)
+	d := time.Duration(float64(base) * scale)
+	if d > 0 {
+		time.Sleep(d)
+	}
+}
+
+// workerSeed builds a deterministic-but-distinct RNG seed for a given
+// (scenario, role, id) tuple so jitter is reproducible across runs while still
+// being independent across goroutines and across the four scenarios.
+func workerSeed(scenario string, role string, id int) int64 {
+	const fnvOffset = 1469598103934665603
+	const fnvPrime = 1099511628211
+	h := uint64(fnvOffset)
+	for _, b := range []byte(scenario) {
+		h = (h ^ uint64(b)) * fnvPrime
+	}
+	h ^= '|'
+	h *= fnvPrime
+	for _, b := range []byte(role) {
+		h = (h ^ uint64(b)) * fnvPrime
+	}
+	h ^= uint64(id) * fnvPrime
+	// shift right one to clear the sign bit before casting to int64
+	return int64(h >> 1)
 }
 
 func assertPBSDemoPlotExists(path string) error {

@@ -145,11 +145,11 @@ func isKRegular(read CompletedRead, writes []CompletedWrite, k int) bool {
 func IsConsistent(writeObj rpc.Object, readObjs []rpc.Object) bool {
 	for _, readObj := range readObjs {
 		cmp := writeObj.Context.Compare(readObj.Context)
-		if cmp == vclock.Equal || cmp == vclock.Before {
-			return true
-		}
 		if cmp == vclock.After {
 			return false
+		}
+		if cmp == vclock.Equal || cmp == vclock.Before {
+			return true
 		}
 	}
 	return false

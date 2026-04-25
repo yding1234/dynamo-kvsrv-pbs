@@ -55,15 +55,34 @@ import "reflect"
 import "sync"
 import "log"
 import "strings"
+import "math"
 import "math/rand"
 import "time"
 import "sync/atomic"
 
 const (
-	SHORTDELAY = 27   // ms
-	LONGDELAY  = 7000 // ms
-	MAXDELAY   = LONGDELAY + 100
+	SHORTDELAY        = 8    // ms
+	LONGDELAY         = 7000 // ms
+	MAXDELAY          = LONGDELAY + 100
+	LONGTAILBASEDELAY = 200 // ms
+	LONGTAILMINDELAY  = 100 // ms
+	LONGTAILSHAPE     = 1.5 // Pareto alpha; smaller means a heavier tail.
 )
+
+func longTailDelayMs(minMs int) int {
+	if minMs >= LONGDELAY {
+		return LONGDELAY
+	}
+	scale := minMs
+	if scale < LONGTAILMINDELAY {
+		scale = LONGTAILMINDELAY
+	}
+	delay := int(float64(scale) / math.Pow(1-rand.Float64(), 1/LONGTAILSHAPE))
+	if delay > LONGDELAY {
+		return LONGDELAY
+	}
+	return delay
+}
 
 type reqMsg struct {
 	endname interface{} // name of sending ClientEnd
@@ -301,7 +320,8 @@ func (rn *Network) processReq(req reqMsg) {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
-		if reliable == false && (rand.Int()%1000) < 100 {
+		// change the drop rate to 3%
+		if reliable == false && (rand.Int()%1000) < 30 {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
 			return
@@ -348,12 +368,13 @@ func (rn *Network) processReq(req reqMsg) {
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
 			req.replyCh <- replyMsg{false, nil}
-		} else if reliable == false && (rand.Int()%1000) < 100 {
+		} else if reliable == false && (rand.Int()%1000) < 30 { // change drop rate to 3%
 			// drop the reply, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
-		} else if longreordering == true && rand.Intn(900) < 600 {
-			// delay the response for a while
-			ms := 200 + rand.Intn(1+rand.Intn(2000))
+		} else if longreordering == true && rand.Intn(1000) < 30 { //change long delay rate to 3%
+			// Long-tail latency: most delayed replies are modest, but a few
+			// hit the LONGDELAY cap.
+			ms := longTailDelayMs(LONGTAILBASEDELAY)
 			// Russ points out that this timer arrangement will decrease
 			// the number of goroutines, so that the race
 			// detector is less likely to get upset.
@@ -371,7 +392,7 @@ func (rn *Network) processReq(req reqMsg) {
 		if rn.IsLongDelays() {
 			// let Raft tests check that leader doesn't send
 			// RPCs synchronously.
-			ms = (rand.Int() % LONGDELAY)
+			ms = longTailDelayMs(0)
 		} else {
 			// many kv tests require the client to try each
 			// server in fairly rapid succession.

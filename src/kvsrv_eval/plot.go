@@ -2,7 +2,9 @@ package kvsrv_eval
 
 import (
 	"encoding/csv"
+	"fmt"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,11 +13,19 @@ import (
 	"gonum.org/v1/plot"
 	"gonum.org/v1/plot/plotter"
 	"gonum.org/v1/plot/vg"
+	"gonum.org/v1/plot/vg/draw"
 )
+
+// PBSThreshold99_99 is the probability level we annotate on zoom plots so
+// readers can see at-a-glance which Δ (or K) each consistency mechanism
+// requires to reach 99.99% staleness probability.
+const PBSThreshold99_99 = 0.9999
 
 type PlotOutput struct {
 	DeltaPPath          string
 	KPPath              string
+	DeltaPZoomPath      string // empty when zoom plots are disabled
+	KPZoomPath          string // empty when zoom plots are disabled
 	DeltaCSVPath        string
 	KPCSVPath           string
 	SeriesConfigCSVPath string
@@ -123,9 +133,18 @@ func PlotComparisonToDir(
 		configRows = append(configRows, cfg)
 	}
 
-	// save the plots and CSVs
+	// y-axis bounds for the main plots.
+	// <=0 means "auto-fit to predicted + observed" (delta) / observed-only (k).
+	// We keep the original behavior: delta_p.png used to ignore predicted in
+	// auto-fit so the observed cluster wasn't squashed; we preserve that.
+	mainDeltaYMin, mainDeltaYMax := resolveYRange(config.YMin, config.YMax,
+		minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPs))
+	mainKPYMin, mainKPYMax := resolveYRange(config.YMin, config.YMax,
+		minSeriesLeft(predictedKPSeries, observedKPs))
+
+	// save the plots and CSVs (main plots: no threshold marker)
 	deltaPlot := filepath.Join(outputDir, "delta_p.png")
-	if err := saveDeltaPlot(deltaPlot, deltas, predictedDeltaSeries, observedDeltaPs); err != nil {
+	if err := saveDeltaPlot(deltaPlot, deltas, predictedDeltaSeries, observedDeltaPs, mainDeltaYMin, mainDeltaYMax, 0); err != nil {
 		return PlotOutput{}, err
 	}
 	deltaCSV := filepath.Join(outputDir, "delta_p.csv")
@@ -134,7 +153,7 @@ func PlotComparisonToDir(
 	}
 
 	kpPlot := filepath.Join(outputDir, "k_p.png")
-	if err := saveKPPlot(kpPlot, ks, predictedKPSeries, observedKPs); err != nil {
+	if err := saveKPPlot(kpPlot, ks, predictedKPSeries, observedKPs, mainKPYMin, mainKPYMax, 0); err != nil {
 		return PlotOutput{}, err
 	}
 	kpCSV := filepath.Join(outputDir, "k_p.csv")
@@ -147,13 +166,64 @@ func PlotComparisonToDir(
 		return PlotOutput{}, err
 	}
 
-	return PlotOutput{
+	out := PlotOutput{
 		DeltaPPath:          deltaPlot,
-		KPPath:              kpPlot,
+		KPPath:               kpPlot,
 		DeltaCSVPath:        deltaCSV,
 		KPCSVPath:           kpCSV,
 		SeriesConfigCSVPath: configCSV,
-	}, nil
+	}
+
+	// Optional zoom plots: y-axis fit to observed series only so that the
+	// near-1.0 differences between baseline / read_repair / anti_entropy /
+	// hinted_handoff are visually distinguishable.
+	if config.EmitZoomPlot {
+		zoomDeltaYMin := minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPs) - 0.005
+		zoomKPYMin := minSeriesLeft(NamedProbabilitySeries{}, observedKPs) - 0.005
+		if zoomDeltaYMin < 0 {
+			zoomDeltaYMin = 0
+		}
+		if zoomKPYMin < 0 {
+			zoomKPYMin = 0
+		}
+
+		// Pass an empty predicted series so the zoom plot only shows observed
+		// curves; otherwise the predicted line would be partially clipped at
+		// the bottom of the zoomed y-range and add visual noise.
+		// Pass threshold so each observed series gets a "first crosses 99.99%"
+		// annotation (vertical drop-line + label) for at-a-glance comparison.
+		deltaZoom := filepath.Join(outputDir, "delta_p_zoom.png")
+		if err := saveDeltaPlot(deltaZoom, deltas, NamedProbabilitySeries{}, observedDeltaPs, zoomDeltaYMin, 1.0, PBSThreshold99_99); err != nil {
+			return PlotOutput{}, err
+		}
+		kpZoom := filepath.Join(outputDir, "k_p_zoom.png")
+		if err := saveKPPlot(kpZoom, ks, NamedProbabilitySeries{}, observedKPs, zoomKPYMin, 1.0, PBSThreshold99_99); err != nil {
+			return PlotOutput{}, err
+		}
+		out.DeltaPZoomPath = deltaZoom
+		out.KPZoomPath = kpZoom
+	}
+
+	return out, nil
+}
+
+// resolveYRange returns the (min, max) to use for a plot's y-axis given the
+// user override (<=0 means "auto") and the auto-fit floor.
+func resolveYRange(yMin, yMax, autoMin float64) (float64, float64) {
+	resolvedMin := autoMin
+	if yMin > 0 {
+		resolvedMin = yMin
+	}
+	resolvedMax := 1.0
+	if yMax > 0 {
+		resolvedMax = yMax
+	}
+	if resolvedMin >= resolvedMax {
+		// guard against caller passing a degenerate range
+		resolvedMin = autoMin
+		resolvedMax = 1.0
+	}
+	return resolvedMin, resolvedMax
 }
 
 // probabilities extracts the Probability field from each SimulationResult.
@@ -182,23 +252,25 @@ func minSeriesLeft(predicted NamedProbabilitySeries, observed []NamedProbability
 }
 
 
-func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries) error {
+func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries, yMin, yMax, threshold float64) error {
 	p := plot.New()
 	p.Title.Text = "Delta-P"
 	p.X.Label.Text = "Delta (ms)"
 	p.Y.Label.Text = "Probability"
-	// don't use predicted to see observed lines more clearly
-	p.Y.Min = minSeriesLeft(NamedProbabilitySeries{Name: predicted.Name, Label: predicted.Label, Values: make([]float64, 0)}, observed)
-	p.Y.Max = 1
+	p.Y.Min = yMin
+	p.Y.Max = yMax
 
-	// predicted line
-	predictedLine, err := plotter.NewLine(DelatPsToXYs(deltas, predicted.Values))
-	if err != nil {
-		return err
+	// predicted line (skip when caller passed an empty series, e.g. zoom plot
+	// that intentionally omits the predicted curve to declutter the view).
+	if len(predicted.Values) > 0 {
+		predictedLine, err := plotter.NewLine(DelatPsToXYs(deltas, predicted.Values))
+		if err != nil {
+			return err
+		}
+		stylePredictedLine(predictedLine)
+		p.Add(predictedLine)
+		p.Legend.Add(predicted.Label, predictedLine)
 	}
-	stylePredictedLine(predictedLine)
-	p.Add(predictedLine)
-	p.Legend.Add(predicted.Label, predictedLine)
 
 	// observed lines
 	for i, series := range observed {
@@ -211,25 +283,53 @@ func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabili
 		p.Legend.Add(series.Label, observedLine)
 	}
 
+	// Threshold annotation: horizontal dashed line at y=threshold plus a
+	// vertical drop-line + text label at the first delta where each observed
+	// series crosses the threshold.
+	if threshold > 0 && yMin < threshold && threshold <= yMax {
+		xMin := durationToMilliseconds(deltas[0])
+		xMax := durationToMilliseconds(deltas[len(deltas)-1])
+		if err := addThresholdLine(p, xMin, xMax, threshold); err != nil {
+			return err
+		}
+		xs := make([]float64, len(deltas))
+		for i, d := range deltas {
+			xs[i] = durationToMilliseconds(d)
+		}
+		for i, series := range observed {
+			x, ok := firstCrossingX(xs, series.Values, threshold)
+			if !ok {
+				continue
+			}
+			if err := addCrossingMarker(p, x, threshold, yMin,
+				fmt.Sprintf("%s: %.2fms", series.Label, x), i); err != nil {
+				return err
+			}
+		}
+	}
+
 	return p.Save(7*vg.Inch, 4.5*vg.Inch, path)
 }
 
-func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries) error {
+func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries, yMin, yMax, threshold float64) error {
 	p := plot.New()
 	p.Title.Text = "K-P"
 	p.X.Label.Text = "K"
 	p.Y.Label.Text = "Probability"
-	p.Y.Min = minSeriesLeft(predicted, observed)
-	p.Y.Max = 1
+	p.Y.Min = yMin
+	p.Y.Max = yMax
 
-	// predicted line
-	predictedLine, err := plotter.NewLine(KPsToXYs(ks, predicted.Values))
-	if err != nil {
-		return err
+	// predicted line (skip when caller passed an empty series, e.g. zoom plot
+	// that intentionally omits the predicted curve to declutter the view).
+	if len(predicted.Values) > 0 {
+		predictedLine, err := plotter.NewLine(KPsToXYs(ks, predicted.Values))
+		if err != nil {
+			return err
+		}
+		stylePredictedLine(predictedLine)
+		p.Add(predictedLine)
+		p.Legend.Add(predicted.Label, predictedLine)
 	}
-	stylePredictedLine(predictedLine)
-	p.Add(predictedLine)
-	p.Legend.Add(predicted.Label, predictedLine)
 
 	// observed lines
 	for i, series := range observed {
@@ -242,7 +342,126 @@ func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observe
 		p.Legend.Add(series.Label, observedLine)
 	}
 
+	// Threshold annotation; same idea as saveDeltaPlot but K is discrete
+	// so we report the smallest *integer* K at which the series crosses
+	// the threshold (no interpolation makes sense for K-regularity).
+	if threshold > 0 && yMin < threshold && threshold <= yMax {
+		xMin := float64(ks[0])
+		xMax := float64(ks[len(ks)-1])
+		if err := addThresholdLine(p, xMin, xMax, threshold); err != nil {
+			return err
+		}
+		for i, series := range observed {
+			k, ok := firstCrossingK(ks, series.Values, threshold)
+			if !ok {
+				continue
+			}
+			label := fmt.Sprintf("%s: K=%d", series.Label, k)
+			if err := addCrossingMarker(p, float64(k), threshold, yMin, label, i); err != nil {
+				return err
+			}
+		}
+	}
+
 	return p.Save(7*vg.Inch, 4.5*vg.Inch, path)
+}
+
+// firstCrossingK returns the smallest integer K at which the curve first
+// reaches or exceeds threshold. K-regularity is defined over discrete K, so
+// no interpolation is performed. Returns (0, false) when no swept K crosses.
+func firstCrossingK(ks []int, ys []float64, threshold float64) (int, bool) {
+	if len(ks) == 0 || len(ks) != len(ys) {
+		return 0, false
+	}
+	for i, y := range ys {
+		if y >= threshold {
+			return ks[i], true
+		}
+	}
+	return 0, false
+}
+
+// firstCrossingX returns the smallest x where the (xs, ys) curve first reaches
+// or exceeds threshold. Linear interpolation is used between the two adjacent
+// points that bracket the crossing. Returns (0, false) if the curve never
+// crosses (e.g. the observed series tops out below threshold within the swept
+// range).
+func firstCrossingX(xs []float64, ys []float64, threshold float64) (float64, bool) {
+	if len(xs) == 0 || len(xs) != len(ys) {
+		return 0, false
+	}
+	if ys[0] >= threshold {
+		return xs[0], true
+	}
+	for i := 1; i < len(ys); i++ {
+		if ys[i] >= threshold {
+			y0, y1 := ys[i-1], ys[i]
+			x0, x1 := xs[i-1], xs[i]
+			if y1 == y0 {
+				return x1, true
+			}
+			t := (threshold - y0) / (y1 - y0)
+			return x0 + t*(x1-x0), true
+		}
+	}
+	return 0, false
+}
+
+// addThresholdLine draws a horizontal dashed line at y=threshold over [xMin, xMax].
+func addThresholdLine(p *plot.Plot, xMin, xMax, threshold float64) error {
+	line, err := plotter.NewLine(plotter.XYs{{X: xMin, Y: threshold}, {X: xMax, Y: threshold}})
+	if err != nil {
+		return err
+	}
+	line.Color = color.RGBA{R: 100, G: 100, B: 100, A: 200}
+	line.Width = vg.Points(0.8)
+	line.Dashes = []vg.Length{vg.Points(2), vg.Points(2)}
+	p.Add(line)
+	p.Legend.Add(fmt.Sprintf("P=%.4f", threshold), line)
+	return nil
+}
+
+// addCrossingMarker draws a short vertical line from yMin to threshold at x,
+// plus a text label placed near the top. The label color matches the i-th
+// observed series so it lines up visually with the curve.
+func addCrossingMarker(p *plot.Plot, x, threshold, yMin float64, label string, seriesIdx int) error {
+	col := observedPalette[seriesIdx%len(observedPalette)]
+
+	drop, err := plotter.NewLine(plotter.XYs{{X: x, Y: yMin}, {X: x, Y: threshold}})
+	if err != nil {
+		return err
+	}
+	drop.Color = col
+	drop.Width = vg.Points(0.8)
+	drop.Dashes = []vg.Length{vg.Points(3), vg.Points(2)}
+	p.Add(drop)
+
+	// Stagger labels along Y so they don't overlap when several series cross
+	// at nearly the same x. seriesIdx 0 sits highest, subsequent ones step
+	// down by ~6% of the (threshold - yMin) span.
+	span := threshold - yMin
+	if span <= 0 {
+		span = math.Max(threshold*0.001, 1e-6)
+	}
+	yLabel := threshold - span*(0.05+0.06*float64(seriesIdx))
+	if yLabel < yMin {
+		yLabel = yMin + span*0.02
+	}
+
+	labels, err := plotter.NewLabels(plotter.XYLabels{
+		XYs:    plotter.XYs{{X: x, Y: yLabel}},
+		Labels: []string{" " + label},
+	})
+	if err != nil {
+		return err
+	}
+	for li := range labels.TextStyle {
+		labels.TextStyle[li].Color = col
+		labels.TextStyle[li].XAlign = draw.XLeft
+		labels.TextStyle[li].YAlign = draw.YCenter
+	}
+	p.Add(labels)
+	return nil
 }
 
 func saveDeltaCSV(path string, deltas []time.Duration, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries) error {
@@ -349,15 +568,18 @@ func stylePredictedLine(line *plotter.Line) {
 	line.Dashes = []vg.Length{vg.Points(5), vg.Points(3)}
 }
 
+// observedPalette is shared by styleObservedLine and addCrossingMarker so
+// crossing-line / label colors visually match their parent observed curve.
+var observedPalette = []color.RGBA{
+	{R: 31, G: 119, B: 180, A: 255},
+	{R: 44, G: 160, B: 44, A: 255},
+	{R: 255, G: 127, B: 14, A: 255},
+	{R: 148, G: 103, B: 189, A: 255},
+	{R: 140, G: 86, B: 75, A: 255},
+}
+
 func styleObservedLine(line *plotter.Line, idx int) {
-	palette := []color.RGBA{
-		{R: 31, G: 119, B: 180, A: 255},
-		{R: 44, G: 160, B: 44, A: 255},
-		{R: 255, G: 127, B: 14, A: 255},
-		{R: 148, G: 103, B: 189, A: 255},
-		{R: 140, G: 86, B: 75, A: 255},
-	}
-	line.Color = palette[idx%len(palette)]
+	line.Color = observedPalette[idx%len(observedPalette)]
 	line.Width = vg.Points(1.5)
 }
 
