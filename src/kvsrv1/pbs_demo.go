@@ -21,18 +21,18 @@ import (
 const pbsDemoNumSectors = 512 // TODO: make this a constant in the simulation config
 
 type PBSDemoStats struct {
-	WriteOK            int64
-	WriteErrVersion    int64
-	WriteQuorumRetry   int64 // ErrWriteQuorumNotMet (transient, retried)
-	WriteOtherErr      int64
-	ReadOK             int64
-	ReadNoKey          int64 // ErrNoKey (transient, retried)
-	ReadQuorumRetry    int64 // ErrReadQuorumNotMet (transient, retried)
-	ReadErr            int64
+	WriteOK          int64
+	WriteErrVersion  int64
+	WriteQuorumRetry int64 // ErrWriteQuorumNotMet (transient, retried)
+	WriteOtherErr    int64
+	ReadOK           int64
+	ReadNoKey        int64 // ErrNoKey (transient, retried)
+	ReadQuorumRetry  int64 // ErrReadQuorumNotMet (transient, retried)
+	ReadErr          int64
 	// ProbeReadOK        int64
 	// ProbeReadErr       int64
-	RefreshOK          int64 // number of times the merkle tree is refreshed
-	RefreshErr         int64
+	RefreshOK  int64 // number of times the merkle tree is refreshed
+	RefreshErr int64
 }
 
 type PBSDemoResult struct {
@@ -51,26 +51,26 @@ type PBSDemoScenario struct {
 }
 
 type PBSDemoOptions struct {
-	OutputDir          string
-	Key                string
-	WorkloadIterations int
-	NumWriters         int
-	SleepBetweenOps    time.Duration
-	NumReaders         int
-	ReadSleep          time.Duration
+	OutputDir        string
+	Key              string
+	WorkloadDuration time.Duration
+	NumWriters       int
+	SleepBetweenOps  time.Duration
+	NumReaders       int
+	ReadSleep        time.Duration
 	// SleepJitterRatio adds uniform jitter to writer/reader sleep so calls
 	// don't land in lock-step. Each sleep is drawn from
 	// [base*(1-ratio), base*(1+ratio)]. 0 disables jitter; values >1 are
 	// clamped to 1 (so the lower bound never goes negative).
 	SleepJitterRatio float64
 	// ProbeReadsPerWrite int
-	NumNodes           int
+	NumNodes int
 	// UnreliableNetwork enables labrpc's reliable=false mode: ~10% request
-	// drops, ~10% reply drops, and a small per-message random delay. 
+	// drops, ~10% reply drops, and a small per-message random delay.
 	UnreliableNetwork bool
 	// LongReordering enables labrpc's longReordering mode: ~60% of replies
 	// are delayed by 200~2000ms. Only meaningful when UnreliableNetwork
-	// is also true 
+	// is also true
 	LongReordering bool
 	PlotConfig     kvsrv_eval.SimulationConfig
 	Scenarios      []PBSDemoScenario
@@ -78,19 +78,19 @@ type PBSDemoOptions struct {
 
 func DefaultPBSDemoOptions() PBSDemoOptions {
 	return PBSDemoOptions{
-		OutputDir:          ".",
-		Key:                "pbs-demo-key",
-		WorkloadIterations: 300,
-		NumWriters:         1,
-		SleepBetweenOps:    1 * time.Millisecond,
-		NumReaders:         10,
-		ReadSleep:          2 * time.Millisecond,
-		SleepJitterRatio:   0.5, // ±50% uniform jitter to break lock-step
+		OutputDir:        ".",
+		Key:              "pbs-demo-key",
+		WorkloadDuration: 2 * time.Second,
+		NumWriters:       1,
+		SleepBetweenOps:  1 * time.Millisecond,
+		NumReaders:       10,
+		ReadSleep:        2 * time.Millisecond,
+		SleepJitterRatio: 0.5, // ±50% uniform jitter to break lock-step
 
 		// ProbeReadsPerWrite: 0,
-		NumNodes:           5,
-		UnreliableNetwork:  false,
-		LongReordering:     false,
+		NumNodes:          5,
+		UnreliableNetwork: false,
+		LongReordering:    false,
 		PlotConfig: kvsrv_eval.SimulationConfig{
 			NumReplicas:  3,
 			ReadQuorum:   1,
@@ -155,8 +155,8 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	if opts.Key == "" {
 		opts.Key = "pbs-demo-key"
 	}
-	if opts.WorkloadIterations <= 0 {
-		return PBSDemoResult{}, fmt.Errorf("WorkloadIterations must be > 0")
+	if opts.WorkloadDuration <= 0 {
+		return PBSDemoResult{}, fmt.Errorf("WorkloadDuration must be > 0")
 	}
 	if opts.NumWriters <= 0 {
 		return PBSDemoResult{}, fmt.Errorf("NumWriters must be > 0")
@@ -275,7 +275,7 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 }
 
 func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_eval.PBSCollector, PBSDemoStats, error) {
-	ring, _, servers, cleanup := makePBSDemoCluster(opts.NumNodes, opts.PlotConfig.NumReplicas, 
+	ring, _, servers, cleanup := makePBSDemoCluster(opts.NumNodes, opts.PlotConfig.NumReplicas,
 		opts.PlotConfig.ReadQuorum, opts.PlotConfig.WriteQuorum, opts.UnreliableNetwork, opts.LongReordering)
 	defer cleanup()
 
@@ -325,6 +325,10 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	var stopWorkers atomic.Bool
 	var readersWG sync.WaitGroup
 	var writersWG sync.WaitGroup
+	stopTimer := time.AfterFunc(opts.WorkloadDuration, func() {
+		stopWorkers.Store(true)
+	})
+	defer stopTimer.Stop()
 
 	workerErrCh := make(chan error, 1)
 	reportFatalErr := func(err error) {
@@ -374,11 +378,11 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 		go func(writerID int) {
 			defer writersWG.Done()
 
-			writerCtx := initialCtx.Copy() // start with the initial context
+			writerCtx := initialCtx.Copy()                                      // start with the initial context
 			writerLabel := fmt.Sprintf("%s-writer-%d", scenario.Name, writerID) // TODO: experiment with multiple writers and multiple keys
 			rng := rand.New(rand.NewSource(workerSeed(scenario.Name, "writer", writerID)))
 
-			for i := 0; i < opts.WorkloadIterations && !stopWorkers.Load(); i++ {
+			for i := 0; !stopWorkers.Load(); i++ {
 				value := fmt.Sprintf("%s-writer-%02d-value-%02d", scenario.Name, writerID, i) // TODO: experiment with multiple values
 				for !stopWorkers.Load() {
 					nextCtx := writerCtx.Copy()
@@ -389,53 +393,53 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 						return
 					}
 
-				switch putErr {
-				case rpc.OK:
-					writeOK.Add(1)
-					writerCtx = committedCtx
-					// for probe := 0; probe < opts.ProbeReadsPerWrite; probe++ {
-					// 	softErr, hardErr := demoGet(coordinator, opts.Key)
-					// 	if hardErr != nil {
-					// 		probeReadErr.Add(1)
-					// 		reportFatalErr(fmt.Errorf("writer %d iteration %d probe read %d: %w", writerID, i, probe, hardErr))
-					// 		return
-					// 	}
-					// 	if softErr == rpc.OK {
-					// 		probeReadOK.Add(1)
-					// 	} else {
-					// 		probeReadErr.Add(1)
-					// 	}
-					// }
-					jitteredSleep(rng, opts.SleepBetweenOps, opts.SleepJitterRatio)
-					goto nextWrite
-				case rpc.ErrVersion:
-					writeErrVersion.Add(1)
-					latestCtx, ok, err := demoGetLatestContext(coordinator, opts.Key) // TODO: experiment with multiple keys
-					if err != nil {
-						refreshErr.Add(1)
-						reportFatalErr(fmt.Errorf("writer %d iteration %d refresh failed: %w", writerID, i, err))
+					switch putErr {
+					case rpc.OK:
+						writeOK.Add(1)
+						writerCtx = committedCtx
+						// for probe := 0; probe < opts.ProbeReadsPerWrite; probe++ {
+						// 	softErr, hardErr := demoGet(coordinator, opts.Key)
+						// 	if hardErr != nil {
+						// 		probeReadErr.Add(1)
+						// 		reportFatalErr(fmt.Errorf("writer %d iteration %d probe read %d: %w", writerID, i, probe, hardErr))
+						// 		return
+						// 	}
+						// 	if softErr == rpc.OK {
+						// 		probeReadOK.Add(1)
+						// 	} else {
+						// 		probeReadErr.Add(1)
+						// 	}
+						// }
+						jitteredSleep(rng, opts.SleepBetweenOps, opts.SleepJitterRatio)
+						goto nextWrite
+					case rpc.ErrVersion:
+						writeErrVersion.Add(1)
+						latestCtx, ok, err := demoGetLatestContext(coordinator, opts.Key) // TODO: experiment with multiple keys
+						if err != nil {
+							refreshErr.Add(1)
+							reportFatalErr(fmt.Errorf("writer %d iteration %d refresh failed: %w", writerID, i, err))
+							return
+						}
+						if !ok {
+							// Transient (NoKey/quorum). Try the put again with the
+							// same base context; the cluster will eventually heal.
+							refreshErr.Add(1)
+							continue
+						}
+						refreshOK.Add(1)
+						writerCtx = latestCtx
+						continue
+					case rpc.ErrWriteQuorumNotMet, rpc.ErrNoKey:
+						// Transient under unreliable networks: drops/timeouts can
+						// prevent meeting quorum or leave a fresh replica without
+						// the key briefly. Just retry the same put.
+						writeQuorumRetry.Add(1)
+						continue
+					default:
+						writeOtherErr.Add(1)
+						reportFatalErr(fmt.Errorf("writer %d iteration %d put failed: %v", writerID, i, putErr))
 						return
 					}
-					if !ok {
-						// Transient (NoKey/quorum). Try the put again with the
-						// same base context; the cluster will eventually heal.
-						refreshErr.Add(1)
-						continue
-					}
-					refreshOK.Add(1)
-					writerCtx = latestCtx
-					continue
-				case rpc.ErrWriteQuorumNotMet, rpc.ErrNoKey:
-					// Transient under unreliable networks: drops/timeouts can
-					// prevent meeting quorum or leave a fresh replica without
-					// the key briefly. Just retry the same put.
-					writeQuorumRetry.Add(1)
-					continue
-				default:
-					writeOtherErr.Add(1)
-					reportFatalErr(fmt.Errorf("writer %d iteration %d put failed: %v", writerID, i, putErr))
-					return
-				}
 				}
 			nextWrite:
 			}
@@ -452,7 +456,7 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	}
 
 	// wait for the hinted handoff and anti-entropy to complete
-	if scenario.EnableHintedHandoff { 
+	if scenario.EnableHintedHandoff {
 		time.Sleep(2 * defaultHintedHandoffInterval)
 	}
 	if scenario.EnableAntiEntropy {
@@ -470,8 +474,8 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 		ReadErr:          readErr.Load(),
 		// ProbeReadOK:      probeReadOK.Load(),
 		// ProbeReadErr:     probeReadErr.Load(),
-		RefreshOK:        refreshOK.Load(),
-		RefreshErr:       refreshErr.Load(),
+		RefreshOK:  refreshOK.Load(),
+		RefreshErr: refreshErr.Load(),
 	}
 	return coordinator.collector, stats, nil
 }
@@ -674,7 +678,7 @@ func (kv *KVServer) markMemberStatus(serverID string, status rpc.NodeStatus) {
 	kv.members[serverID] = member
 }
 
-func makePBSDemoCluster(numNodes int, numReplicas int, readQuorum int, writeQuorum int, 
+func makePBSDemoCluster(numNodes int, numReplicas int, readQuorum int, writeQuorum int,
 	unreliable bool, longReordering bool) (*chr.ConsistentHashRing, []string, map[string]*KVServer, func()) {
 	nodeIDs := make([]string, 0, numNodes)
 	for i := 0; i < numNodes; i++ {
@@ -706,9 +710,9 @@ func makePBSDemoCluster(numNodes int, numReplicas int, readQuorum int, writeQuor
 		servers[nodeID] = MakeKVServer(nodeID, ring, writeQuorum, readQuorum, ends[nodeID])
 	}
 	for _, nodeID := range nodeIDs {
-		rs := labrpc.MakeServer() // make a server for each node
+		rs := labrpc.MakeServer()                          // make a server for each node
 		rs.AddService(labrpc.MakeService(servers[nodeID])) // add the service to the server
-		net.AddServer(nodeID, rs) // add the server to the network
+		net.AddServer(nodeID, rs)                          // add the server to the network
 	}
 
 	cleanup := func() {

@@ -8,7 +8,7 @@
   authors: (
     "Yulin Ding": author-meta(
       "NYU",
-      email: "yd1234@nyu.edu", // TODO: replace with real email
+      email: "yd3442@nyu.edu",
     ),
   ),
   affiliations: (

@@ -18,7 +18,7 @@ func main() {
 	numReplicas := flag.Int("n", opts.PlotConfig.NumReplicas, "replication factor N used by both the real cluster and prediction")
 	readQuorum := flag.Int("r", opts.PlotConfig.ReadQuorum, "read quorum R used by both the real cluster and prediction")
 	writeQuorum := flag.Int("w", opts.PlotConfig.WriteQuorum, "write quorum W used by both the real cluster and prediction")
-	workloadIterations := flag.Int("ops", opts.WorkloadIterations, "number of put/get iterations to run against the demo cluster")
+	workloadDuration := flag.Duration("duration", opts.WorkloadDuration, "duration to run each demo scenario")
 	numWriters := flag.Int("writers", opts.NumWriters, "number of writer goroutines")
 	sleepBetweenOps := flag.Duration("sleep", opts.SleepBetweenOps, "delay between operations")
 	numReaders := flag.Int("readers", opts.NumReaders, "number of reader goroutines")
@@ -41,7 +41,7 @@ func main() {
 	opts.PlotConfig.NumReplicas = *numReplicas
 	opts.PlotConfig.ReadQuorum = *readQuorum
 	opts.PlotConfig.WriteQuorum = *writeQuorum
-	opts.WorkloadIterations = *workloadIterations
+	opts.WorkloadDuration = *workloadDuration
 	opts.NumWriters = *numWriters
 	opts.SleepBetweenOps = *sleepBetweenOps
 	opts.NumReaders = *numReaders
