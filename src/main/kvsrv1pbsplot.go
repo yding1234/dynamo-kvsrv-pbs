@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	kvsrv "6.5840/kvsrv1"
@@ -13,7 +15,7 @@ import (
 func main() {
 	opts := kvsrv.DefaultPBSDemoOptions()
 
-	outputDir := flag.String("out", ".", "directory to write delta_p.png and k_p.png")
+	outputDir := flag.String("out", "exps", "base directory for per-run experiment outputs")
 	numNodes := flag.Int("num-nodes", opts.NumNodes, "total number of nodes in the demo cluster")
 	numReplicas := flag.Int("n", opts.PlotConfig.NumReplicas, "replication factor N used by both the real cluster and prediction")
 	readQuorum := flag.Int("r", opts.PlotConfig.ReadQuorum, "read quorum R used by both the real cluster and prediction")
@@ -27,8 +29,8 @@ func main() {
 	delta := flag.Duration("delta", opts.PlotConfig.Delta, "max delta value for the delta-P sweep")
 	deltaPoints := flag.Int("delta-points", opts.PlotConfig.DeltaPoints, "number of sample points along the delta axis")
 	maxK := flag.Int("k", opts.PlotConfig.K, "max K value for the K-P sweep")
-	unreliable := flag.Bool("unreliable", opts.UnreliableNetwork, "enable labrpc unreliable network (~10% drop, small per-message delay) to widen the PBS transition window")
-	longReordering := flag.Bool("long-reordering", opts.LongReordering, "enable labrpc long-reordering (~60% of replies delayed 200~2000ms); only meaningful with -unreliable")
+	unreliable := flag.Bool("unreliable", true, "enable labrpc unreliable network (~10% drop, small per-message delay) to widen the PBS transition window")
+	longReordering := flag.Bool("long-reordering", true, "enable labrpc long-reordering (~60% of replies delayed 200~2000ms); only meaningful with -unreliable")
 	simIterations := flag.Int("sim-iters", opts.PlotConfig.Iterations, "number of Monte Carlo iterations for delta-P prediction")
 	yMin := flag.Float64("ymin", opts.PlotConfig.YMin, "y-axis lower bound for delta_p.png and k_p.png; <=0 means auto-fit")
 	yMax := flag.Float64("ymax", opts.PlotConfig.YMax, "y-axis upper bound for delta_p.png and k_p.png; <=0 means 1.0")
@@ -36,7 +38,7 @@ func main() {
 	seed := flag.Int64("seed", 7, "seed for the prediction RNG")
 	flag.Parse()
 
-	opts.OutputDir = *outputDir
+	opts.OutputDir = filepath.Join(*outputDir, experimentDirName(*numReplicas, *writeQuorum, *readQuorum, *workloadDuration, *unreliable, *longReordering))
 	opts.NumNodes = *numNodes
 	opts.PlotConfig.NumReplicas = *numReplicas
 	opts.PlotConfig.ReadQuorum = *readQuorum
@@ -97,4 +99,19 @@ func main() {
 		)
 	}
 	fmt.Printf("completed in %s\n", time.Since(startedAt).Round(time.Millisecond))
+}
+
+func experimentDirName(numReplicas int, writeQuorum int, readQuorum int, duration time.Duration, unreliable bool, longReordering bool) string {
+	networkMode := "reliable"
+	if unreliable {
+		networkMode = "unreliable"
+	}
+	reorderingMode := "no-long-reordering"
+	if longReordering {
+		reorderingMode = "long-reordering"
+	}
+
+	name := fmt.Sprintf("n%d_w%d_r%d_duration%s_%s_%s",
+		numReplicas, writeQuorum, readQuorum, duration, networkMode, reorderingMode)
+	return strings.NewReplacer("/", "-", "\\", "-", " ", "").Replace(name)
 }
