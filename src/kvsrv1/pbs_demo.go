@@ -53,20 +53,7 @@ type PBSDemoScenario struct {
 }
 
 type PBSDemoOptions struct {
-	OutputDir string
-	// Key is kept for backwards compatibility. When Keys is empty, the demo
-	// runs against this single key (so existing single-key configs keep
-	// working). When Keys is non-empty, Key is ignored.
-	Key string
-	// Keys is the working set the demo cycles through. With multiple keys,
-	// each writer/reader picks a key uniformly at random per request, which:
-	//   * spreads load across distinct preference lists (different keys hash
-	//     to different replica triples), exercising more of the ring;
-	//   * lets per-key VC chains evolve independently, so cross-key
-	//     causality doesn't artificially inflate sibling lists;
-	//   * makes per-coordinator pick distribution more uniform across the
-	//     entire cluster (not just one prefList of N nodes).
-	// If empty, defaults to []string{Key}.
+	OutputDir 	     string
 	Keys             []string
 	WorkloadDuration time.Duration
 	NumWriters       int
@@ -85,7 +72,7 @@ type PBSDemoOptions struct {
 	UnreliableNetwork bool
 	// LongReordering enables labrpc's longReordering mode: ~60% of replies
 	// are delayed by 200~2000ms. Only meaningful when UnreliableNetwork
-	// is also true 
+	// is also true
 	LongReordering bool
 	// RandomCoordinator picks a fresh coordinator (uniformly from the key's
 	// preference list) for each request. When false, every request goes to
@@ -100,18 +87,18 @@ type PBSDemoOptions struct {
 func DefaultPBSDemoOptions() PBSDemoOptions {
 	return PBSDemoOptions{
 		OutputDir:        ".",
-		Key:              "pbs-demo-key",
-		WorkloadDuration: 10 * time.Second,
+		Keys:              []string{"pbs-demo-key"},
+		WorkloadDuration: 30 * time.Second,
 		NumWriters:       1,
-		SleepBetweenOps:  2 * time.Millisecond,
-		NumReaders:       50,
-		ReadSleep:        5 * time.Millisecond,
-		SleepJitterRatio: 0.5, // ±50% uniform jitter to break lock-step
+		SleepBetweenOps:  10 * time.Millisecond,
+		NumReaders:       10,
+		ReadSleep:        2 * time.Millisecond,
+		SleepJitterRatio: 0.5,
 
 		// ProbeReadsPerWrite: 0,
 		NumNodes:          5,
-		UnreliableNetwork: true,
-		LongReordering:    true,
+		UnreliableNetwork: false,
+		LongReordering:    false,
 		RandomCoordinator: true,
 		PlotConfig: kvsrv_eval.SimulationConfig{
 			NumReplicas:  3,
@@ -120,7 +107,7 @@ func DefaultPBSDemoOptions() PBSDemoOptions {
 			Delta:        20 * time.Millisecond,
 			DeltaPoints:  50, // number of sample points along the delta axis
 			K:            6,
-			Iterations:   5000, // number of Monte Carlo iterations for delta-P prediction
+			Iterations:   3000, // number of Monte Carlo iterations for delta-P prediction
 			RNG:          rand.New(rand.NewSource(7)),
 			YMin:         0,    // 0 = auto-fit
 			YMax:         0,    // 0 = 1.0
@@ -156,14 +143,15 @@ func DefaultPBSDemoScenarios() []PBSDemoScenario {
 			EnableHintedHandoff: false,
 			FailureMode:         "none",
 		},
-		{
-			Name:                "observe_hinted_handoff",
-			Label:               "observe_hinted_handoff",
-			EnableReadRepair:    false,
-			EnableAntiEntropy:   false,
-			EnableHintedHandoff: true,
-			FailureMode:         "single_dead_replica",
-		},
+		// {
+		// 	Name:                "observe_hinted_handoff",
+		// 	Label:               "observe_hinted_handoff",
+		// 	EnableReadRepair:    false,
+		// 	EnableAntiEntropy:   false,
+		// 	EnableHintedHandoff: true,
+		// 	//FailureMode:         "single_dead_replica",
+		// 	FailureMode:         "none",
+		// },
 	}
 }
 
@@ -174,11 +162,8 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
 		return PBSDemoResult{}, err
 	}
-	if opts.Key == "" {
-		opts.Key = "pbs-demo-key"
-	}
 	if len(opts.Keys) == 0 {
-		opts.Keys = []string{opts.Key}
+		opts.Keys = []string{"pbs-demo-key"}
 	}
 	for i, k := range opts.Keys {
 		if k == "" {
@@ -236,7 +221,8 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 				FailureMode:   scenario.FailureMode,
 				Notes:         "Observed PBS curve from the corresponding demo scenario.",
 			},
-			Collector: collector,
+			Collector:    collector,
+			ReadAttempts: stats.ReadOK + stats.ReadNoKey + stats.ReadQuorumRetry + stats.ReadErr,
 		})
 		statsByScenario[scenario.Name] = stats
 	}
@@ -269,6 +255,12 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	if err := assertPBSDemoPlotExists(output.KPPath); err != nil {
 		return PBSDemoResult{}, err
 	}
+	if err := assertPBSDemoPlotExists(output.DeltaPE2EPath); err != nil {
+		return PBSDemoResult{}, err
+	}
+	if err := assertPBSDemoPlotExists(output.KPE2EPath); err != nil {
+		return PBSDemoResult{}, err
+	}
 	if output.DeltaPZoomPath != "" {
 		if err := assertPBSDemoPlotExists(output.DeltaPZoomPath); err != nil {
 			return PBSDemoResult{}, err
@@ -282,6 +274,8 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 
 	output.DeltaPPath, _ = filepath.Abs(output.DeltaPPath)
 	output.KPPath, _ = filepath.Abs(output.KPPath)
+	output.DeltaPE2EPath, _ = filepath.Abs(output.DeltaPE2EPath)
+	output.KPE2EPath, _ = filepath.Abs(output.KPE2EPath)
 	output.DeltaCSVPath, _ = filepath.Abs(output.DeltaCSVPath)
 	output.KPCSVPath, _ = filepath.Abs(output.KPCSVPath)
 	output.SeriesConfigCSVPath, _ = filepath.Abs(output.SeriesConfigCSVPath)
@@ -314,19 +308,16 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	defer cleanup()
 
 	for _, server := range servers {
-		server.readRepairEnabled = scenario.EnableReadRepair
-		server.hintedHandoffEnabled = scenario.EnableHintedHandoff
-		// Always start the merkle refresher on the demo path so that
-		// repair-driven merges (RepairPut, ApplyDiff) don't pay an
-		// inline sector-wide SHA-256 sweep under kv.mu - that sweep
-		// is what serialised the writer behind reader-driven repair
-		// in the read_repair scenario. Tests don't start it because
-		// they want synchronous merkle updates after installObjects.
-		server.StartMerkleRefresher(defaultMerkleRefreshInterval)
+		if scenario.EnableReadRepair {
+			server.readRepairEnabled = true
+			server.StartReadRepairWorkers()
+		}
 		if scenario.EnableAntiEntropy {
+			server.StartMerkleRefresher()
 			server.StartAntiEntropy()
 		}
 		if scenario.EnableHintedHandoff {
+			server.hintedHandoffEnabled = true
 			server.StartMembershipFailureDetector()
 			server.StartSyncMembers()
 			server.StartHintedHandoff()
@@ -450,7 +441,7 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 			// different worker IDs get independent jitter sequences.
 			rng := rand.New(rand.NewSource(workerSeed(scenario.Name, "reader", readerID)))
 			for !stopWorkers.Load() {
-				key := pickKey(rng)
+				key := pickKey(rng) // pick a random key
 				softErr, hardErr := demoGet(pickCoordinator(rng, key), key)
 				if hardErr != nil {
 					readErr.Add(1)

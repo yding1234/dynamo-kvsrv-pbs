@@ -7,32 +7,49 @@ import (
 )
 
 func (kv *KVServer) StartAntiEntropy() {
-	rand.Seed(int64(time.Now().UnixNano()))
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	go func() {
-		ticker := time.NewTicker(kv.antiEntropyInterval)
-		defer ticker.Stop()
+		timer := time.NewTimer(jitteredAntiEntropyDelay(kv.antiEntropyInterval, kv.antiEntropyJitterRatio, rng))
+		defer timer.Stop()
 		for {
 			select {
-				case <-ticker.C:
-					// choose a random sector from the sectors managed by the server
-					sectors := kv.GetResponsibleSectors()
-					if len(sectors) == 0 {
-						continue
-					}
-					randSector := sectors[rand.Intn(len(sectors))]
+			case <-timer.C:
+				// choose a random sector from the sectors managed by the server
+				sectors := kv.GetResponsibleSectors()
+				if len(sectors) > 0 {
+					randSector := sectors[rng.Intn(len(sectors))]
 					// choose a random neighbor sector of the sector, excluding the sector itself
 					_, neighborSectors := kv.ring.GetNeighbors(randSector)
-					if len(neighborSectors) <= 1 {
-						continue
+					if len(neighborSectors) > 1 {
+						randChosen := rng.Intn(len(neighborSectors)-1) + 1 // +1 because the sector itself is not a neighbor
+						kv.Reconcile(randSector, neighborSectors[randChosen])
 					}
-					randChosen := rand.Intn(len(neighborSectors)-1) + 1 // +1 because the sector itself is not a neighbor
-
-					kv.Reconcile(randSector, neighborSectors[randChosen])
-				case <-kv.stopCh:
-					return
 				}
+				timer.Reset(jitteredAntiEntropyDelay(kv.antiEntropyInterval, kv.antiEntropyJitterRatio, rng))
+			case <-kv.stopCh:
+				return
 			}
-		}()
+		}
+	}()
+}
+
+func jitteredAntiEntropyDelay(base time.Duration, jitterRatio float64, rng *rand.Rand) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if jitterRatio <= 0 {
+		return base
+	}
+	if jitterRatio > 1 {
+		jitterRatio = 1
+	}
+	// Uniform jitter in [1-jitterRatio, 1+jitterRatio].
+	factor := 1 + (rng.Float64()*2-1)*jitterRatio
+	delay := time.Duration(float64(base) * factor)
+	if delay < time.Millisecond {
+		return time.Millisecond
+	}
+	return delay
 }
 
 // reconcile with the neighbor sector
@@ -45,11 +62,10 @@ func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	}
 
 	summary := root.ToSummary()
-	
 
 	repairGetDiffArgs := rpc.RepairGetDiffArgs{Sector: sector, Summary: summary}
 	repairGetDiffReply := rpc.RepairGetDiffReply{}
-	
+
 	ok = kv.ends[neighborNode].Call("KVServer.RepairGetDiff", &repairGetDiffArgs, &repairGetDiffReply)
 	if !ok {
 		// network error
@@ -71,10 +87,9 @@ func (kv *KVServer) Reconcile(sector int, neighborSector int) {
 	kv.ApplyDiff(sector, diffKeyInfos, neighborNode)
 }
 
-
 func (kv *KVServer) RepairGetDiff(args *rpc.RepairGetDiffArgs, reply *rpc.RepairGetDiffReply) {
 	mySector := args.Sector
-	
+
 	myRoot, ok := kv.GetMerkleRoot(mySector)
 	if !ok || myRoot == nil {
 		reply.Err = rpc.ErrNoHashValue
@@ -94,7 +109,7 @@ func (kv *KVServer) RepairGetDiff(args *rpc.RepairGetDiffArgs, reply *rpc.Repair
 		// add the key and its siblings in the current bucket to the reply
 		for _, key := range keys {
 			reply.DiffKeyInfos = append(reply.DiffKeyInfos, rpc.KeyInfo{
-				Key: key,
+				Key:     key,
 				Objects: kv.GetSiblings(key),
 			})
 		}
@@ -112,9 +127,9 @@ func findDiffBuckets(mySummary, neighborSummary rpc.TreeSummary) []int {
 	for len(queue) > 0 {
 		currPos := queue[0]
 		queue = queue[1:]
-		
+
 		if myHashes[currPos] != neighborHashes[currPos] {
-			// since each sectors has same number of buckets, 
+			// since each sectors has same number of buckets,
 			// we can directly check one merkle tree position to find if it's internal or leaf
 			// and there is no chance that one is internal and the other is leaf
 			if currPos < len(myHashes)/2 { // internal node
@@ -144,7 +159,7 @@ func (kv *KVServer) ApplyDiff(sector int, diffKeyInfos []rpc.KeyInfo, neighborNo
 			continue
 		}
 
-		// repair put the merged view to the neighbor; 
+		// repair put the merged view to the neighbor;
 		// repairPut also uses merge semantics so the neighbor will not roll back any concurrent writes
 		kv.ends[neighborNode].Call("KVServer.RepairPut",
 			&rpc.RepairArgs{Key: key, Objects: merged, Delete: false}, &rpc.RepairReply{})

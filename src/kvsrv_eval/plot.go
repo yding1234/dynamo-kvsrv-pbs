@@ -24,13 +24,16 @@ const PBSThreshold99_99 = 0.9999
 type PlotOutput struct {
 	DeltaPPath          string
 	KPPath              string
+	DeltaPE2EPath       string
+	KPE2EPath           string
+	DeltaPE2ECSVPath    string
+	KPE2ECSVPath        string
 	DeltaPZoomPath      string // empty when zoom plots are disabled
 	KPZoomPath          string // empty when zoom plots are disabled
 	DeltaCSVPath        string
 	KPCSVPath           string
 	SeriesConfigCSVPath string
 }
-
 
 // configuration for a series of observations or predictions.
 type SeriesConfig struct {
@@ -48,6 +51,10 @@ type SeriesConfig struct {
 type CollectorSeries struct {
 	Config    SeriesConfig
 	Collector *PBSCollector
+	// ReadAttempts is total read attempts for end-to-end probability
+	// (non-stale reads / all attempts). When <=0, observed curves fall back
+	// to successful-read denominator.
+	ReadAttempts int64
 }
 
 // a series of probability values for a given delta or k value
@@ -56,7 +63,6 @@ type NamedProbabilitySeries struct {
 	Label  string
 	Values []float64
 }
-
 
 func Plot(config SimulationConfig, collector *PBSCollector) (PlotOutput, error) {
 	return PlotToDir(config, collector, ".")
@@ -114,6 +120,8 @@ func PlotComparisonToDir(
 
 	observedDeltaPs := make([]NamedProbabilitySeries, 0, len(observedSeries))
 	observedKPs := make([]NamedProbabilitySeries, 0, len(observedSeries))
+	observedDeltaPE2E := make([]NamedProbabilitySeries, 0, len(observedSeries))
+	observedKPE2E := make([]NamedProbabilitySeries, 0, len(observedSeries))
 	configRows := make([]SeriesConfig, 0, len(observedSeries)+1) // predicted and observed series configs
 	configRows = append(configRows, predictedConfig)
 
@@ -129,6 +137,16 @@ func PlotComparisonToDir(
 			Name:   cfg.Name,
 			Label:  cfg.Label,
 			Values: ObserveKPSweep(observed.Collector, ks),
+		})
+		observedDeltaPE2E = append(observedDeltaPE2E, NamedProbabilitySeries{
+			Name:   cfg.Name + "_e2e",
+			Label:  cfg.Label + "_e2e",
+			Values: ObserveDeltaPSweepE2E(observed.Collector, deltas, observed.ReadAttempts),
+		})
+		observedKPE2E = append(observedKPE2E, NamedProbabilitySeries{
+			Name:   cfg.Name + "_e2e",
+			Label:  cfg.Label + "_e2e",
+			Values: ObserveKPSweepE2E(observed.Collector, ks, observed.ReadAttempts),
 		})
 		configRows = append(configRows, cfg)
 	}
@@ -160,6 +178,30 @@ func PlotComparisonToDir(
 	if err := saveKPCSV(kpCSV, ks, predictedKPSeries, observedKPs); err != nil {
 		return PlotOutput{}, err
 	}
+	deltaPE2EPlot := filepath.Join(outputDir, "delta_p_e2e.png")
+	e2eDeltaYMin := minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPE2E) - 0.005
+	if e2eDeltaYMin < 0 {
+		e2eDeltaYMin = 0
+	}
+	if err := saveDeltaPlot(deltaPE2EPlot, deltas, NamedProbabilitySeries{}, observedDeltaPE2E, e2eDeltaYMin, 1.0, PBSThreshold99_99); err != nil {
+		return PlotOutput{}, err
+	}
+	kpE2EPlot := filepath.Join(outputDir, "k_p_e2e.png")
+	e2eKPYMin := minSeriesLeft(NamedProbabilitySeries{}, observedKPE2E) - 0.005
+	if e2eKPYMin < 0 {
+		e2eKPYMin = 0
+	}
+	if err := saveKPPlot(kpE2EPlot, ks, NamedProbabilitySeries{}, observedKPE2E, e2eKPYMin, 1.0, PBSThreshold99_99); err != nil {
+		return PlotOutput{}, err
+	}
+	deltaPE2ECSV := filepath.Join(outputDir, "delta_p_e2e.csv")
+	if err := saveDeltaObservedCSV(deltaPE2ECSV, deltas, observedDeltaPE2E); err != nil {
+		return PlotOutput{}, err
+	}
+	kpE2ECSV := filepath.Join(outputDir, "k_p_e2e.csv")
+	if err := saveKPObservedCSV(kpE2ECSV, ks, observedKPE2E); err != nil {
+		return PlotOutput{}, err
+	}
 
 	configCSV := filepath.Join(outputDir, "pbs_series_config.csv")
 	if err := saveSeriesConfigCSV(configCSV, configRows); err != nil {
@@ -168,7 +210,11 @@ func PlotComparisonToDir(
 
 	out := PlotOutput{
 		DeltaPPath:          deltaPlot,
-		KPPath:               kpPlot,
+		KPPath:              kpPlot,
+		DeltaPE2EPath:       deltaPE2EPlot,
+		KPE2EPath:           kpE2EPlot,
+		DeltaPE2ECSVPath:    deltaPE2ECSV,
+		KPE2ECSVPath:        kpE2ECSV,
 		DeltaCSVPath:        deltaCSV,
 		KPCSVPath:           kpCSV,
 		SeriesConfigCSVPath: configCSV,
@@ -250,7 +296,6 @@ func minSeriesLeft(predicted NamedProbabilitySeries, observed []NamedProbability
 	}
 	return m
 }
-
 
 func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries, yMin, yMax, threshold float64) error {
 	p := plot.New()
@@ -506,6 +551,40 @@ func saveKPCSV(path string, ks []int, predicted NamedProbabilitySeries, observed
 	return writeCSV(path, rows)
 }
 
+func saveDeltaObservedCSV(path string, deltas []time.Duration, observed []NamedProbabilitySeries) error {
+	header := []string{"delta_ms"}
+	for _, series := range observed {
+		header = append(header, series.Name)
+	}
+	rows := make([][]string, 0, len(deltas)+1)
+	rows = append(rows, header)
+	for i, delta := range deltas {
+		row := []string{formatFloat(durationToMilliseconds(delta))}
+		for _, series := range observed {
+			row = append(row, formatFloat(series.Values[i]))
+		}
+		rows = append(rows, row)
+	}
+	return writeCSV(path, rows)
+}
+
+func saveKPObservedCSV(path string, ks []int, observed []NamedProbabilitySeries) error {
+	header := []string{"k"}
+	for _, series := range observed {
+		header = append(header, series.Name)
+	}
+	rows := make([][]string, 0, len(ks)+1)
+	rows = append(rows, header)
+	for i, k := range ks {
+		row := []string{strconv.Itoa(k)}
+		for _, series := range observed {
+			row = append(row, formatFloat(series.Values[i]))
+		}
+		rows = append(rows, row)
+	}
+	return writeCSV(path, rows)
+}
+
 func saveSeriesConfigCSV(path string, configs []SeriesConfig) error {
 	rows := [][]string{
 		{"name", "label", "kind", "read_repair", "anti_entropy", "hinted_handoff", "failure_mode", "notes"},
@@ -588,22 +667,22 @@ func durationToMilliseconds(d time.Duration) float64 {
 }
 
 func deltaSweep(maxDelta time.Duration, points int) []time.Duration {
-    if maxDelta <= 0 {
-        return []time.Duration{0}
-    }
-    if points <= 1 {
-        return []time.Duration{0, maxDelta}
-    }
+	if maxDelta <= 0 {
+		return []time.Duration{0}
+	}
+	if points <= 1 {
+		return []time.Duration{0, maxDelta}
+	}
 
-    deltas := make([]time.Duration, 0, points+1)
-    for i := 0; i <= points; i++ {
-        d := time.Duration(int64(i) * int64(maxDelta) / int64(points))
-        
-        if len(deltas) == 0 || d != deltas[len(deltas)-1] {
-            deltas = append(deltas, d)
-        }
-    }
-    return deltas
+	deltas := make([]time.Duration, 0, points+1)
+	for i := 0; i <= points; i++ {
+		d := time.Duration(int64(i) * int64(maxDelta) / int64(points))
+
+		if len(deltas) == 0 || d != deltas[len(deltas)-1] {
+			deltas = append(deltas, d)
+		}
+	}
+	return deltas
 }
 
 func kSweep(maxK int) []int {

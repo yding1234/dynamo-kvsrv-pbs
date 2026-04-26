@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"hash"
+	"math/rand"
 	"slices"
 	"time"
 
@@ -15,14 +16,14 @@ import (
 // 2. all integers are encoded in little-endian order
 
 func writeUint64(h hash.Hash, x uint64) {
-    var buf [8]byte // 8 bytes for uint64
-    binary.LittleEndian.PutUint64(buf[:], x)
-    h.Write(buf[:])
+	var buf [8]byte // 8 bytes for uint64
+	binary.LittleEndian.PutUint64(buf[:], x)
+	h.Write(buf[:])
 }
 
 func writeString(h hash.Hash, s string) {
-    writeUint64(h, uint64(len(s)))
-    h.Write([]byte(s))
+	writeUint64(h, uint64(len(s)))
+	h.Write([]byte(s))
 }
 
 func writeBytes(h hash.Hash, b []byte) {
@@ -32,28 +33,27 @@ func writeBytes(h hash.Hash, b []byte) {
 
 func writeObject(h hash.Hash, obj rpc.Object) {
 	// write value, timestamp, and vclock
-    writeString(h, obj.Value)
-    writeUint64(h, obj.Context.Timestamp)
+	writeString(h, obj.Value)
+	writeUint64(h, obj.Context.Timestamp)
 
 	vc := obj.Context.VC.ToVCEntries(nil) // sort by node name
 	writeUint64(h, uint64(len(vc)))
-    for _, entry := range vc {
-        writeString(h, entry.Node)
-        writeUint64(h, entry.Version)
-    }
+	for _, entry := range vc {
+		writeString(h, entry.Node)
+		writeUint64(h, entry.Version)
+	}
 }
 
-
-func writeKVPair(h hash.Hash,key string, objs []rpc.Object) {
-    writeString(h, key)
+func writeKVPair(h hash.Hash, key string, objs []rpc.Object) {
+	writeString(h, key)
 	writeUint64(h, uint64(len(objs)))
 
 	if !rpc.IsOrdered(objs, nil) { // TODO: change to use rpc.Object.IsOrdered
 		objs = rpc.SortObjects(objs, nil)
 	}
-    for _, obj := range objs {
-        writeObject(h, obj)
-    }
+	for _, obj := range objs {
+		writeObject(h, obj)
+	}
 }
 
 func finalizeHash(h hash.Hash) [32]byte {
@@ -62,31 +62,29 @@ func finalizeHash(h hash.Hash) [32]byte {
 	return sum
 }
 
-
 type MerkleNode struct {
-    Level    int
+	Level int
 
-	Sector   int
+	Sector int
 	// only for leaf nodes, otherwise -1
-	Bucket   int
+	Bucket int
 
-	Parent   *MerkleNode
-    Left     *MerkleNode
-    Right    *MerkleNode
-	Hash     [32]byte
+	Parent *MerkleNode
+	Left   *MerkleNode
+	Right  *MerkleNode
+	Hash   [32]byte
 }
 
-// TODO: fix after GetNodeDigest
 func (kv *KVServer) MakeMerkleNode(level, sector, bucket int, left, right *MerkleNode) *MerkleNode {
 	node := &MerkleNode{
-        Level: level,
+		Level:  level,
 		Sector: sector,
 		Bucket: bucket,
 		Parent: nil,
-        Left: left,
-        Right: right,
-		Hash: [32]byte{},
-    }
+		Left:   left,
+		Right:  right,
+		Hash:   [32]byte{},
+	}
 	node.Hash = node.GetNodeDigest(kv)
 	if left != nil {
 		left.Parent = node
@@ -102,7 +100,7 @@ func (kv *KVServer) MakeMerkleLeaf(sector, bucket int) *MerkleNode {
 }
 
 func (kv *KVServer) MakeMerkleInternalNode(left, right *MerkleNode) *MerkleNode {
-	return kv.MakeMerkleNode(left.Level + 1, left.Sector, -1, left, right)
+	return kv.MakeMerkleNode(left.Level+1, left.Sector, -1, left, right)
 }
 
 // TODO: get digest from the whole sector first, devided into smaller parts later
@@ -141,29 +139,22 @@ func (node *MerkleNode) GetNodeDigest(kv *KVServer) [32]byte {
 }
 
 func (node *MerkleNode) IsLeaf() bool {
-    return node.Left == nil && node.Right == nil
+	return node.Left == nil && node.Right == nil
 }
 
 func (node *MerkleNode) IsRoot() bool {
-    return node != nil && node.Parent == nil
+	return node != nil && node.Parent == nil
 }
 
 func (node *MerkleNode) IsInternal() bool {
-    return node.Left != nil && node.Right != nil
+	return node.Left != nil && node.Right != nil
 }
 
-// sectorSnapshot is a point-in-time copy of every bucket's key list and
-// every key's siblings for a single sector, taken under kv.mu so the
-// subsequent SHA-256 sweep can run lock-free.
 type sectorSnapshot struct {
 	keysPerBucket [][]string
 	siblings      map[string][]rpc.Object
 }
 
-// snapshotSector copies enough state under one short kv.mu acquire that
-// BuildMerkleTree can hash the rest of the sector without touching the
-// data lock. This is the change that actually unblocks writers when
-// read_repair fires thousands of merkle rebuilds per second.
 func (kv *KVServer) snapshotSector(sector int) sectorSnapshot {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -184,16 +175,11 @@ func (kv *KVServer) snapshotSector(sector int) sectorSnapshot {
 	return snap
 }
 
-// Build one fixed leaf per bucket so every replica produces the same tree shape.
 func (kv *KVServer) BuildMerkleTree(sector int) *MerkleNode {
 	snap := kv.snapshotSector(sector)
 	return buildMerkleTreeFromSnapshot(sector, snap)
 }
 
-// buildMerkleTreeFromSnapshot mirrors the previous BuildMerkleTree
-// shape but consumes the pre-fetched snapshot instead of pulling each
-// leaf's data through GetSiblings/GetKeysFromBucket (which would each
-// take kv.mu independently and fight the writer path).
 func buildMerkleTreeFromSnapshot(sector int, snap sectorSnapshot) *MerkleNode {
 	leaves := make([]*MerkleNode, 0, len(snap.keysPerBucket))
 	for bucket := 0; bucket < len(snap.keysPerBucket); bucket++ {
@@ -219,8 +205,6 @@ func makeMerkleLeafFromSnapshot(sector, bucket int, snap sectorSnapshot) *Merkle
 	h := sha256.New()
 	keys := snap.keysPerBucket[bucket]
 	if !slices.IsSorted(keys) {
-		// snap.keysPerBucket[bucket] was copied in snapshotSector so
-		// sorting it in place won't disturb the live state.
 		slices.Sort(keys)
 	}
 	writeUint64(h, uint64(len(keys)))
@@ -268,39 +252,33 @@ func makeMerkleInternalNodeFromSnapshot(left, right *MerkleNode) *MerkleNode {
 
 func (kv *KVServer) BuildAllMerkleTrees() {
 	for sector := range kv.keysInBuckets {
-		newRoot := kv.BuildMerkleTree(sector)
-		kv.merkleMu.Lock()
-		kv.merkleRoots[sector] = newRoot
-		kv.merkleMu.Unlock()
+		kv.rebuildMerkleTreeForSector(sector)
 	}
 }
 
-func (kv *KVServer) StartRefreshMerkleTrees(interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				kv.refreshMerkleTrees()
-			case <-kv.stopCh:
-				return
-			}
-		}
-	}()
-}
+// func (kv *KVServer) StartRefreshMerkleTrees(interval time.Duration) {
+// 	go func() {
+// 		ticker := time.NewTicker(interval)
+// 		defer ticker.Stop()
+// 		for {
+// 			select {
+// 			case <-ticker.C:
+// 				kv.refreshMerkleTrees()
+// 			case <-kv.stopCh:
+// 				return
+// 			}
+// 		}
+// 	}()
+// }
 
-// TODO: Incremental update of the merkle tree instead of rebuilding the whole tree
-func (kv *KVServer) refreshMerkleTrees() {
-	// rebuild the merkle tree
-	// TODO: jitter the rebuild time to avoid synchronization
-	for sector := 0; sector < kv.ring.NumSectors(); sector++ {
-		newRoot := kv.BuildMerkleTree(sector)
-		kv.merkleMu.Lock()
-		kv.merkleRoots[sector] = newRoot
-		kv.merkleMu.Unlock()
-	}
-}
+// // TODO: Incremental update of the merkle tree instead of rebuilding the whole tree
+// func (kv *KVServer) refreshMerkleTrees() {
+// 	// rebuild the merkle tree
+// 	// TODO: jitter the rebuild time to avoid synchronization
+// 	for sector := 0; sector < kv.ring.NumSectors(); sector++ {
+// 		kv.rebuildMerkleTreeForSector(sector)
+// 	}
+// }
 
 func (kv *KVServer) GetMerkleRoot(sector int) (*MerkleNode, bool) {
 	kv.merkleMu.Lock()
@@ -328,7 +306,7 @@ func (root *MerkleNode) ToSummary() rpc.TreeSummary {
 			queue = append(queue, node.Right)
 		}
 	}
-	
+
 	return rpc.TreeSummary{
 		Sector: root.Sector,
 		Hashes: hashes,
@@ -342,4 +320,81 @@ func IsEmptyHash(hash [32]byte) bool {
 	writeString(h, "empty")
 	emptyHash := finalizeHash(h)
 	return hash == emptyHash
+}
+
+// jitterOnce returns a duration in [base*(1-ratio), base*(1+ratio)] (same
+// semantics as pbs_demo jitteredSleep). ratio<=0 yields base; ratio>1 is clamped.
+func jitterOnce(base time.Duration, ratio float64, rng *rand.Rand) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if ratio <= 0 {
+		return base
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	scale := 1 + ratio*(2*rng.Float64()-1)
+	d := time.Duration(float64(base) * scale)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+func (kv *KVServer) StartMerkleRefresher() {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	if kv.merkleRefreshInterval <= 0 {
+		return
+	}
+
+	go func() {
+		for {
+			d := jitterOnce(kv.merkleRefreshInterval, kv.merkleRefreshJitterRatio, rng)
+			select {
+			case <-time.After(d):
+				kv.flushDirtyMerkle()
+			case <-kv.stopCh:
+				kv.flushDirtyMerkle()
+				return
+			}
+		}
+	}()
+}
+
+// swap the dirty set out and return the
+// snapshot for the refresher to process.
+func (kv *KVServer) drainDirtySectors() []int {
+	kv.dirtyMu.Lock()
+	defer kv.dirtyMu.Unlock()
+
+	if len(kv.dirtySectors) == 0 {
+		return nil
+	}
+	sectors := make([]int, 0, len(kv.dirtySectors))
+	for s := range kv.dirtySectors {
+		sectors = append(sectors, s)
+	}
+	kv.dirtySectors = make(map[int]struct{}, len(sectors))
+	return sectors
+}
+
+func (kv *KVServer) flushDirtyMerkle() {
+	sectors := kv.drainDirtySectors()
+	for _, sector := range sectors {
+		kv.rebuildMerkleTreeForSector(sector)
+	}
+}
+
+func (kv *KVServer) markSectorDirty(sector int) {
+	kv.dirtyMu.Lock()
+	kv.dirtySectors[sector] = struct{}{}
+	kv.dirtyMu.Unlock()
+}
+
+func (kv *KVServer) rebuildMerkleTreeForSector(sector int) {
+	newRoot := kv.BuildMerkleTree(sector)
+	kv.merkleMu.Lock()
+	kv.merkleRoots[sector] = newRoot
+	kv.merkleMu.Unlock()
 }

@@ -14,13 +14,15 @@ import (
 
 const Debug = false
 
-var defaultAntiEntropyInterval = 100 * time.Millisecond
-var defaultGossipInterval = 100 * time.Millisecond
-var defaultHeartbeatTimeout = 100 * time.Millisecond
-var defaultFailureTimeout = 500 * time.Millisecond
-var defaultCleanupTimeout = 1500 * time.Millisecond
-var defaultHintedHandoffInterval = 100 * time.Millisecond
-var defaultMerkleRefreshInterval = 50 * time.Millisecond
+var defaultAntiEntropyInterval = 2000 * time.Millisecond // per 200 writes
+var defaultAntiEntropyJitterRatio = 0.3
+var defaultGossipInterval = 1000 * time.Millisecond // per 100 writes
+var defaultHeartbeatTimeout = 1000 * time.Millisecond
+var defaultFailureTimeout = 5000 * time.Millisecond // per 100 writes
+var defaultCleanupTimeout = 15000 * time.Millisecond
+var defaultHintedHandoffInterval = 1000 * time.Millisecond // per 100 writes
+var defaultMerkleRefreshInterval = 500 * time.Millisecond // per 50 writes
+var defaultMerkleRefreshJitterRatio = 0.3
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -58,19 +60,26 @@ type KVServer struct {
 	// forwarding requests to the replicas
 	ends map[string]*labrpc.ClientEnd
 
+	// read-repair
+	readRepairJobCh        chan *readRepairJob
+	readRepairCoalesceMu   sync.Mutex
+	readRepairCoalesce     map[string]*readRepairCoalesceEntry // key -> coalesce entry
+	readRepairPipelineOnce sync.Once
+
 	// anti-entropy
 	// merkleRoots map[int]rpc.TreeSummary // sector ID -> merkle tree summary
-	merkleRoots         map[int]*MerkleNode // sector ID -> merkle root, guarded by merkleMu
-	keysInBuckets       [][][]string        // sector ID -> bucket ID -> keys
-	antiEntropyInterval time.Duration
-	stopCh              chan struct{}
+	merkleRoots            map[int]*MerkleNode // sector ID -> merkle root, guarded by merkleMu
+	keysInBuckets          [][][]string        // sector ID -> bucket ID -> keys
+	antiEntropyInterval    time.Duration
+	antiEntropyJitterRatio float64
+	stopCh                 chan struct{}
 
 	// dirtySectors is the set of sectors whose merkle tree is known to
-	// be stale. The background merkle refresher (StartMerkleRefresher)
-	// drains this set and rebuilds each sector's tree off the hot path.
+	// be stale. The background merkle refresherdrains this set and rebuilds each sector's tree off the hot path.
 	// Guarded by dirtyMu.
-	dirtySectors            map[int]struct{}
-	merkleRefreshInterval   time.Duration
+	dirtySectors          map[int]struct{}
+	merkleRefreshInterval time.Duration
+	merkleRefreshJitterRatio float64
 
 	// membership
 	members           map[string]rpc.MemberInfo // server ID -> member info
@@ -92,43 +101,38 @@ type KVServer struct {
 	// feature toggles used by the PBS demo to compare mechanisms.
 	readRepairEnabled    bool
 	hintedHandoffEnabled bool
-
-	// read-repair pipeline: debounced per-key scheduling + bounded worker pool
-	// (see readrepair_workers.go).
-	readRepairJobCh        chan *readRepairJob
-	readRepairCoalesceMu   sync.Mutex
-	readRepairCoalesce     map[string]*readRepairCoalesceEntry
-	readRepairPipelineOnce sync.Once
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	writeQuorum int, readQuorum int, ends map[string]*labrpc.ClientEnd) *KVServer {
 	kv := &KVServer{id: serverID,
-		kv:                    make(map[string][]rpc.Object),
-		ring:                  ring,
-		writeQuorum:           writeQuorum,
-		readQuorum:            readQuorum,
-		ends:                  ends,
-		merkleRoots:           make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
-		keysInBuckets:         make([][][]string, ring.NumSectors()),
-		antiEntropyInterval:   defaultAntiEntropyInterval,
-		stopCh:                make(chan struct{}),
-		members:               make(map[string]rpc.MemberInfo, len(ends)),
-		memberLastUpdated:     make(map[string]time.Time, len(ends)),
-		numNeighbors:          2,
-		heartbeatTimeout:      defaultHeartbeatTimeout,
-		gossipInterval:        defaultGossipInterval,
-		failureTimeout:        defaultFailureTimeout,
-		cleanupTimeout:        defaultCleanupTimeout,
-		hints:                 make(map[string][]rpc.PutArgs),
-		hintedHandoffInterval: defaultHintedHandoffInterval,
-		collector:             kvsrv_eval.NewPBSCollector(),
-		readRepairEnabled:     true,
-		hintedHandoffEnabled:  true,
-		dirtySectors:          make(map[int]struct{}),
-		merkleRefreshInterval: 0, // off by default; demo opts in via StartMerkleRefresher
-		readRepairJobCh:       make(chan *readRepairJob, readRepairQueueCapacity),
-		readRepairCoalesce:    make(map[string]*readRepairCoalesceEntry),
+		kv:                     make(map[string][]rpc.Object),
+		ring:                   ring,
+		writeQuorum:            writeQuorum,
+		readQuorum:             readQuorum,
+		ends:                   ends,
+		merkleRoots:            make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
+		keysInBuckets:          make([][][]string, ring.NumSectors()),
+		antiEntropyInterval:    defaultAntiEntropyInterval,
+		antiEntropyJitterRatio: defaultAntiEntropyJitterRatio,
+		stopCh:                 make(chan struct{}),
+		members:                make(map[string]rpc.MemberInfo, len(ends)),
+		memberLastUpdated:      make(map[string]time.Time, len(ends)),
+		numNeighbors:           2,
+		heartbeatTimeout:       defaultHeartbeatTimeout,
+		gossipInterval:         defaultGossipInterval,
+		failureTimeout:         defaultFailureTimeout,
+		cleanupTimeout:         defaultCleanupTimeout,
+		hints:                  make(map[string][]rpc.PutArgs),
+		hintedHandoffInterval:  defaultHintedHandoffInterval,
+		collector:              kvsrv_eval.NewPBSCollector(),
+		readRepairEnabled:      true,
+		hintedHandoffEnabled:   true,
+		dirtySectors:           make(map[int]struct{}),
+		merkleRefreshInterval:  defaultMerkleRefreshInterval,
+		merkleRefreshJitterRatio: defaultMerkleRefreshJitterRatio,
+		readRepairJobCh:        make(chan *readRepairJob, readRepairQueueCapacity),
+		readRepairCoalesce:     make(map[string]*readRepairCoalesceEntry),
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -137,9 +141,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 			kv.keysInBuckets[i][j] = make([]string, 0)
 		}
 	}
-	for _, sector := range ring.GetSectors(serverID) {
-		kv.merkleRoots[sector] = kv.BuildMerkleTree(sector)
-	}
+
 	now := time.Now()
 	for nodeID := range ends {
 		kv.members[nodeID] = rpc.MemberInfo{
@@ -158,7 +160,9 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		kv.memberLastUpdated[serverID] = now
 	}
 
-	kv.startReadRepairWorkers()
+	// if kv.readRepairEnabled {
+	// 	kv.startReadRepairWorkers()
+	// }
 	return kv
 }
 
@@ -176,9 +180,7 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// kv.coordMu.Lock()
 	// defer kv.coordMu.Unlock()
 
-	// Any node in the key's preference list may serve as coordinator
-	// (matches the PBS paper's "client picks a random replica" assumption
-	// and Dynamo/Cassandra's symmetric coordinator role).
+
 	if !kv.isInPreferenceList(args.Key) {
 		reply.Err = rpc.ErrNotCoordinator
 		return
@@ -408,31 +410,6 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 	}
 }
 
-func (kv *KVServer) finishCoordGetReadRepair(key string, canonicalSiblings []rpc.Object,
-	results []rpc.ForwardGetResult, ch <-chan rpc.ForwardGetResult, remaining int) {
-	for i := 0; i < remaining; i++ {
-		res := <-ch
-		results = append(results, res)
-		if !res.OK {
-			continue
-		}
-		if res.Reply.Err == rpc.OK {
-			for _, obj := range res.Reply.Objects {
-				if obj.CanBeAddedTo(canonicalSiblings) {
-					canonicalSiblings = rpc.AddObject(canonicalSiblings, obj, nil)
-				}
-			}
-		}
-	}
-
-	hasCanonical := len(canonicalSiblings) > 0
-	if !hasCanonical {
-		return
-	}
-
-	staleReplicas := findStaleReplicas(canonicalSiblings, results)
-	kv.repairReplicas(key, canonicalSiblings, staleReplicas)
-}
 
 func drainForwardGetResults(ch <-chan rpc.ForwardGetResult, remaining int) {
 	for i := 0; i < remaining; i++ {
@@ -651,109 +628,7 @@ func removeKey(keys []string, key string) []string {
 	return keys
 }
 
-// refreshMerkleTreeForSector synchronously rebuilds the merkle tree for
-// sector and publishes it. Hot paths (RepairPut / mergeObjects) should
-// prefer markSectorDirty + the background refresher to keep the merkle
-// rebuild off the critical path.
-func (kv *KVServer) refreshMerkleTreeForSector(sector int) {
-	newRoot := kv.BuildMerkleTree(sector)
-	kv.merkleMu.Lock()
-	kv.merkleRoots[sector] = newRoot
-	kv.merkleMu.Unlock()
-}
-
-// markSectorDirty records that sector's merkle tree is stale and should
-// be rebuilt by the background refresher. Cheap (one short mutex) and
-// safe to call with no other locks held.
-func (kv *KVServer) markSectorDirty(sector int) {
-	kv.dirtyMu.Lock()
-	kv.dirtySectors[sector] = struct{}{}
-	kv.dirtyMu.Unlock()
-}
-
-// drainDirtySectors atomically swaps the dirty set out and returns the
-// snapshot for the refresher to process.
-func (kv *KVServer) drainDirtySectors() []int {
-	kv.dirtyMu.Lock()
-	if len(kv.dirtySectors) == 0 {
-		kv.dirtyMu.Unlock()
-		return nil
-	}
-	sectors := make([]int, 0, len(kv.dirtySectors))
-	for s := range kv.dirtySectors {
-		sectors = append(sectors, s)
-	}
-	kv.dirtySectors = make(map[int]struct{}, len(sectors))
-	kv.dirtyMu.Unlock()
-	return sectors
-}
-
-// flushDirtyMerkle rebuilds every sector currently marked dirty and
-// publishes the new roots under merkleMu. Each rebuild snapshots data
-// briefly under kv.mu and then hashes lock-free, so writers/readers do
-// not contend with the hashing work.
-func (kv *KVServer) flushDirtyMerkle() {
-	sectors := kv.drainDirtySectors()
-	for _, sector := range sectors {
-		newRoot := kv.BuildMerkleTree(sector)
-		kv.merkleMu.Lock()
-		kv.merkleRoots[sector] = newRoot
-		kv.merkleMu.Unlock()
-	}
-}
-
-// StartMerkleRefresher launches the background goroutine that drains
-// dirtySectors and rebuilds their merkle trees every interval. Call
-// once per server. interval <= 0 disables the refresher (callers that
-// want synchronous merkle rebuild on every install should leave this
-// off and rely on installObjects's eager refresh path).
-func (kv *KVServer) StartMerkleRefresher(interval time.Duration) {
-	if interval <= 0 {
-		return
-	}
-	kv.merkleRefreshInterval = interval
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				kv.flushDirtyMerkle()
-			case <-kv.stopCh:
-				// final flush so anti-entropy / shutdown paths see the
-				// freshest tree before we exit.
-				kv.flushDirtyMerkle()
-				return
-			}
-		}
-	}()
-}
-
-// installObjects installs `objects` for `key` and synchronously refreshes
-// the merkle tree for the affected sector. Use this for callers that
-// require an up-to-date merkle root immediately after the install
-// (bootstrap, tests, etc.). Hot repair / merge paths should use
-// installObjectsLazy instead.
 func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
-	sector, bucket := kv.installObjectsCommon(key, objects)
-	kv.refreshMerkleTreeForSector(sector)
-	_ = bucket
-}
-
-// installObjectsLazy installs objects exactly like installObjects but
-// only marks the sector dirty. The merkle tree is rebuilt later by the
-// background refresher (StartMerkleRefresher). This decouples the
-// repair-driven write path from the cost of re-hashing the whole
-// sector and is what lets read_repair scale on the demo's hot path.
-func (kv *KVServer) installObjectsLazy(key string, objects []rpc.Object) {
-	sector, _ := kv.installObjectsCommon(key, objects)
-	kv.markSectorDirty(sector)
-}
-
-// installObjectsCommon performs the shared kv.kv / keysInBuckets update
-// under kv.mu and returns the (sector, bucket) it touched so that the
-// caller can choose between sync and lazy merkle refresh strategies.
-func (kv *KVServer) installObjectsCommon(key string, objects []rpc.Object) (int, int) {
 	sector, bucket := kv.ring.GetLocation(key)
 
 	kv.mu.Lock()
@@ -761,7 +636,8 @@ func (kv *KVServer) installObjectsCommon(key string, objects []rpc.Object) (int,
 		delete(kv.kv, key)
 		kv.keysInBuckets[sector][bucket] = removeKey(kv.keysInBuckets[sector][bucket], key)
 		kv.mu.Unlock()
-		return sector, bucket
+		kv.markSectorDirty(sector)
+		return
 	}
 
 	_, existed := kv.kv[key]
@@ -770,15 +646,10 @@ func (kv *KVServer) installObjectsCommon(key string, objects []rpc.Object) (int,
 		kv.keysInBuckets[sector][bucket] = appendUniqueKey(kv.keysInBuckets[sector][bucket], key)
 	}
 	kv.mu.Unlock()
-	return sector, bucket
+	kv.markSectorDirty(sector)
 }
 
-// mergeObjects merges `incoming` into the local replica using
-// causal-order semantics and returns the resulting siblings list.
-// Used by anti-entropy's ApplyDiff which then forwards `merged` to a
-// neighbor. Repair-only callers that don't need the result should use
-// mergeObjectsAndDiscard to avoid the CopyObjects allocation in the
-// no-change path.
+
 func (kv *KVServer) mergeObjects(key string, incoming []rpc.Object) []rpc.Object {
 	return kv.mergeObjectsCore(key, incoming, true)
 }
@@ -801,19 +672,13 @@ func (kv *KVServer) mergeObjectsCore(key string, incoming []rpc.Object, returnSi
 	merged := existing
 	changed := false
 	for _, obj := range incoming {
-		if !obj.CanBeAddedTo(merged) {
-			continue
+		if obj.CanBeAddedTo(merged) {
+			merged = rpc.AddObject(merged, obj, nil)
+			changed = true
 		}
-		merged = rpc.AddObject(merged, obj, nil)
-		changed = true
 	}
 
 	if !changed {
-		// No-op merge. Skip the allocation entirely if the caller
-		// doesn't want the siblings back; under read_repair this
-		// is the common case (most reads find replicas already
-		// holding the canonical sibling) and that copy alone was
-		// non-trivial cluster-wide.
 		var result []rpc.Object
 		if returnSiblings {
 			result = rpc.CopyObjects(merged)
@@ -823,11 +688,7 @@ func (kv *KVServer) mergeObjectsCore(key string, incoming []rpc.Object, returnSi
 	}
 
 	kv.mu.Unlock()
-	// Lazy install: bump kv.kv now, defer the merkle rebuild so the
-	// hot read-repair / anti-entropy path doesn't pay the per-call
-	// SHA-256 sweep over the whole sector. Ordering with kv.mu is
-	// safe because installObjectsLazy reacquires kv.mu internally.
-	kv.installObjectsLazy(key, merged)
+	kv.installObjects(key, merged)
 	if returnSiblings {
 		return merged
 	}

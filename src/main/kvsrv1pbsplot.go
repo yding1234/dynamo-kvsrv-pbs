@@ -29,8 +29,8 @@ func main() {
 	delta := flag.Duration("delta", opts.PlotConfig.Delta, "max delta value for the delta-P sweep")
 	deltaPoints := flag.Int("delta-points", opts.PlotConfig.DeltaPoints, "number of sample points along the delta axis")
 	maxK := flag.Int("k", opts.PlotConfig.K, "max K value for the K-P sweep")
-	unreliable := flag.Bool("unreliable", true, "enable labrpc unreliable network (~10% drop, small per-message delay) to widen the PBS transition window")
-	longReordering := flag.Bool("long-reordering", true, "enable labrpc long-reordering (~60% of replies delayed 200~2000ms); only meaningful with -unreliable")
+	unreliable := flag.Bool("unreliable", false, "enable labrpc unreliable network (~10% drop, small per-message delay) to widen the PBS transition window")
+	longReordering := flag.Bool("long-reordering", false, "enable labrpc long-reordering (~60% of replies delayed 200~2000ms); only meaningful with -unreliable")
 	simIterations := flag.Int("sim-iters", opts.PlotConfig.Iterations, "number of Monte Carlo iterations for delta-P prediction")
 	yMin := flag.Float64("ymin", opts.PlotConfig.YMin, "y-axis lower bound for delta_p.png and k_p.png; <=0 means auto-fit")
 	yMax := flag.Float64("ymax", opts.PlotConfig.YMax, "y-axis upper bound for delta_p.png and k_p.png; <=0 means 1.0")
@@ -43,7 +43,9 @@ func main() {
 	flag.Parse()
 
 	opts.Keys = resolveKeys(*keysList, *keyPrefix, *numKeys)
-	opts.OutputDir = filepath.Join(*outputDir, experimentDirName(*numReplicas, *writeQuorum, *readQuorum, *workloadDuration, *unreliable, *longReordering, len(opts.Keys)))
+	opts.OutputDir = filepath.Join(*outputDir, experimentDirName(
+		*numReplicas, *writeQuorum, *readQuorum, *numWriters, *numReaders,
+		*workloadDuration, *unreliable, *longReordering, len(opts.Keys)))
 	opts.NumNodes = *numNodes
 	opts.PlotConfig.NumReplicas = *numReplicas
 	opts.PlotConfig.ReadQuorum = *readQuorum
@@ -75,6 +77,8 @@ func main() {
 
 	fmt.Printf("generated Delta-P plot: %s\n", result.Plots.DeltaPPath)
 	fmt.Printf("generated K-P plot: %s\n", result.Plots.KPPath)
+	fmt.Printf("generated Delta-P E2E plot: %s\n", result.Plots.DeltaPE2EPath)
+	fmt.Printf("generated K-P E2E plot: %s\n", result.Plots.KPE2EPath)
 	if result.Plots.DeltaPZoomPath != "" {
 		fmt.Printf("generated Delta-P zoom plot: %s\n", result.Plots.DeltaPZoomPath)
 	}
@@ -107,7 +111,10 @@ func main() {
 	fmt.Printf("completed in %s\n", time.Since(startedAt).Round(time.Millisecond))
 }
 
-func experimentDirName(numReplicas int, writeQuorum int, readQuorum int, duration time.Duration, unreliable bool, longReordering bool, numKeys int) string {
+func experimentDirName(
+	numReplicas int, writeQuorum int, readQuorum int, numWriters int, numReaders int,
+	duration time.Duration, unreliable bool, longReordering bool, numKeys int,
+) string {
 	networkMode := "reliable"
 	if unreliable {
 		networkMode = "unreliable"
@@ -121,20 +128,13 @@ func experimentDirName(numReplicas int, writeQuorum int, readQuorum int, duratio
 	// silently overwrite single-key runs (and vice versa). 1 key keeps the
 	// historical "_keys1" tag rather than the legacy unsuffixed name; if
 	// you want to compare against pre-multikey artefacts move them aside.
-	name := fmt.Sprintf("n%d_w%d_r%d_duration%s_%s_%s_keys%d",
-		numReplicas, writeQuorum, readQuorum, duration, networkMode, reorderingMode, numKeys)
+	// w/r are write/read quorum; writersN/readersM are worker goroutine counts.
+	name := fmt.Sprintf("n%d_w%d_r%d_writers%d_readers%d_duration%s_%s_%s_keys%d",
+		numReplicas, writeQuorum, readQuorum, numWriters, numReaders, duration, networkMode, reorderingMode, numKeys)
 	return strings.NewReplacer("/", "-", "\\", "-", " ", "").Replace(name)
 }
 
-// resolveKeys turns the three CLI flags (-keys, -key-prefix, -num-keys) into
-// the working-set list passed to the demo. Precedence:
-//  1. Explicit -keys wins (comma-separated list).
-//  2. -num-keys == 1 returns the bare keyPrefix (e.g. "pbs-demo-key"),
-//     so single-key runs hash to the same preference list as before the
-//     multi-key refactor and stay comparable to historical experiments.
-//  3. -num-keys >= 2 generates "<prefix>-0".."<prefix>-(N-1)".
-//
-// numKeys < 1 is clamped to 1 so the demo always has at least one key.
+
 func resolveKeys(keysList string, keyPrefix string, numKeys int) []string {
 	if keysList != "" {
 		raw := strings.Split(keysList, ",")

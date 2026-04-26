@@ -47,6 +47,30 @@ func ObserveDeltaPSweep(collector *PBSCollector, deltas []time.Duration) []float
 	return results
 }
 
+// ObserveDeltaPSweepE2E returns end-to-end non-stale probability:
+// non_stale_reads / all_read_attempts.
+// When allReadAttempts <= 0, it falls back to the successful-read denominator.
+func ObserveDeltaPSweepE2E(collector *PBSCollector, deltas []time.Duration, allReadAttempts int64) []float64 {
+	if allReadAttempts <= 0 {
+		return ObserveDeltaPSweep(collector, deltas)
+	}
+	results := make([]float64, len(deltas))
+	writes := collector.Writes()
+	reads := collector.Reads()
+	denom := float64(allReadAttempts)
+
+	for i, delta := range deltas {
+		nonStale := 0
+		for _, read := range reads {
+			if isDeltaRegular(read, writes, delta) {
+				nonStale++
+			}
+		}
+		results[i] = float64(nonStale) / denom
+	}
+	return results
+}
+
 func ObserveKPSweep(collector *PBSCollector, ks []int) []float64 {
 	results := make([]float64, len(ks))
 	writes := collector.Writes()
@@ -58,9 +82,33 @@ func ObserveKPSweep(collector *PBSCollector, ks []int) []float64 {
 	return results
 }
 
+// ObserveKPSweepE2E returns end-to-end non-stale probability:
+// non_stale_reads / all_read_attempts.
+// When allReadAttempts <= 0, it falls back to the successful-read denominator.
+func ObserveKPSweepE2E(collector *PBSCollector, ks []int, allReadAttempts int64) []float64 {
+	if allReadAttempts <= 0 {
+		return ObserveKPSweep(collector, ks)
+	}
+	results := make([]float64, len(ks))
+	writes := collector.Writes()
+	reads := collector.Reads()
+	denom := float64(allReadAttempts)
+
+	for i, k := range ks {
+		nonStale := 0
+		for _, read := range reads {
+			if isKRegular(read, writes, k) {
+				nonStale++
+			}
+		}
+		results[i] = float64(nonStale) / denom
+	}
+	return results
+}
+
 func isDeltaRegular(read CompletedRead, writes []CompletedWrite, delta time.Duration) bool {
 	cutoff := read.StartedAt.Add(-delta)
-	latestWriteBeforeDelta :=  NewCompletedWrite(read.Key, time.Time{}, time.Time{}, rpc.Object{})
+	latestWriteBeforeDelta := NewCompletedWrite(read.Key, time.Time{}, time.Time{}, rpc.Object{})
 
 	for _, write := range writes {
 		if write.Key != read.Key {
