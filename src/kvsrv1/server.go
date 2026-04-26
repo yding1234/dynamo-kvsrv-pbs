@@ -92,6 +92,13 @@ type KVServer struct {
 	// feature toggles used by the PBS demo to compare mechanisms.
 	readRepairEnabled    bool
 	hintedHandoffEnabled bool
+
+	// read-repair pipeline: debounced per-key scheduling + bounded worker pool
+	// (see readrepair_workers.go).
+	readRepairJobCh        chan *readRepairJob
+	readRepairCoalesceMu   sync.Mutex
+	readRepairCoalesce     map[string]*readRepairCoalesceEntry
+	readRepairPipelineOnce sync.Once
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
@@ -120,6 +127,8 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		hintedHandoffEnabled:  true,
 		dirtySectors:          make(map[int]struct{}),
 		merkleRefreshInterval: 0, // off by default; demo opts in via StartMerkleRefresher
+		readRepairJobCh:       make(chan *readRepairJob, readRepairQueueCapacity),
+		readRepairCoalesce:    make(map[string]*readRepairCoalesceEntry),
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -149,6 +158,7 @@ func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 		kv.memberLastUpdated[serverID] = now
 	}
 
+	kv.startReadRepairWorkers()
 	return kv
 }
 
@@ -225,7 +235,13 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
 				remaining := len(prefList) - len(results)
 				if kv.readRepairEnabled {
-					go kv.finishCoordGetReadRepair(args.Key, canonicalSiblings, collectedResults, ch, remaining)
+					kv.scheduleReadRepair(&readRepairJob{
+						key:               args.Key,
+						canonicalSiblings: canonicalSiblings,
+						results:           collectedResults,
+						ch:                ch,
+						remaining:         remaining,
+					})
 				} else {
 					go drainForwardGetResults(ch, remaining)
 				}
@@ -243,7 +259,13 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 				collectedResults := append([]rpc.ForwardGetResult(nil), results...)
 				remaining := len(prefList) - len(results)
 				if kv.readRepairEnabled {
-					go kv.finishCoordGetReadRepair(args.Key, nil, collectedResults, ch, remaining)
+					kv.scheduleReadRepair(&readRepairJob{
+						key:               args.Key,
+						canonicalSiblings: nil,
+						results:           collectedResults,
+						ch:                ch,
+						remaining:         remaining,
+					})
 				} else {
 					go drainForwardGetResults(ch, remaining)
 				}
