@@ -20,7 +20,7 @@ var defaultGossipInterval = 1000 * time.Millisecond // per 100 writes
 var defaultHeartbeatTimeout = 1000 * time.Millisecond
 var defaultFailureTimeout = 5000 * time.Millisecond // per 100 writes
 var defaultCleanupTimeout = 15000 * time.Millisecond
-var defaultHintedHandoffInterval = 1000 * time.Millisecond // per 100 writes
+var defaultHintedHandoffInterval = 2000 * time.Millisecond // per 200 writes
 var defaultMerkleRefreshInterval = 500 * time.Millisecond // per 50 writes
 var defaultMerkleRefreshJitterRatio = 0.3
 

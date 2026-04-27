@@ -21,6 +21,26 @@ import (
 // requires to reach 99.99% staleness probability.
 const PBSThreshold99_99 = 0.9999
 
+// probabilityYMax is the fixed upper bound for all P(staleness) y-axes; values
+// are in [0,1] and we do not autoscale the top of the panel below 1.0.
+const probabilityYMax = 1.0
+
+// ensureProbabilityYSpan fixes gonum's axis sanitizer: when Y.Min==Y.Max it does
+// Min--/Max++ on floats, turning (1,1) into (0,2) and rescaling the panel to
+// 0..2. We keep a strict upper bound of 1.0 but nudge Min slightly below Max
+// when the data floor sits at the ceiling.
+func ensureProbabilityYSpan(yMin float64) (min, max float64) {
+	max = probabilityYMax
+	min = yMin
+	if min >= max {
+		min = math.Nextafter(max, 0)
+	}
+	if min < 0 {
+		min = 0
+	}
+	return min, max
+}
+
 type PlotOutput struct {
 	DeltaPPath          string
 	KPPath              string
@@ -139,13 +159,13 @@ func PlotComparisonToDir(
 			Values: ObserveKPSweep(observed.Collector, ks),
 		})
 		observedDeltaPE2E = append(observedDeltaPE2E, NamedProbabilitySeries{
-			Name:   cfg.Name + "_e2e",
-			Label:  cfg.Label + "_e2e",
+			Name:   cfg.Name,
+			Label:  cfg.Label,
 			Values: ObserveDeltaPSweepE2E(observed.Collector, deltas, observed.ReadAttempts),
 		})
 		observedKPE2E = append(observedKPE2E, NamedProbabilitySeries{
-			Name:   cfg.Name + "_e2e",
-			Label:  cfg.Label + "_e2e",
+			Name:   cfg.Name,
+			Label:  cfg.Label,
 			Values: ObserveKPSweepE2E(observed.Collector, ks, observed.ReadAttempts),
 		})
 		configRows = append(configRows, cfg)
@@ -179,19 +199,19 @@ func PlotComparisonToDir(
 		return PlotOutput{}, err
 	}
 	deltaPE2EPlot := filepath.Join(outputDir, "delta_p_e2e.png")
-	e2eDeltaYMin := minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPE2E) - 0.005
+	e2eDeltaYMin := minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPE2E)
 	if e2eDeltaYMin < 0 {
 		e2eDeltaYMin = 0
 	}
-	if err := saveDeltaPlot(deltaPE2EPlot, deltas, NamedProbabilitySeries{}, observedDeltaPE2E, e2eDeltaYMin, 1.0, PBSThreshold99_99); err != nil {
+	if err := saveDeltaPlot(deltaPE2EPlot, deltas, NamedProbabilitySeries{}, observedDeltaPE2E, e2eDeltaYMin, probabilityYMax, PBSThreshold99_99); err != nil {
 		return PlotOutput{}, err
 	}
 	kpE2EPlot := filepath.Join(outputDir, "k_p_e2e.png")
-	e2eKPYMin := minSeriesLeft(NamedProbabilitySeries{}, observedKPE2E) - 0.005
+	e2eKPYMin := minSeriesLeft(NamedProbabilitySeries{}, observedKPE2E)
 	if e2eKPYMin < 0 {
 		e2eKPYMin = 0
 	}
-	if err := saveKPPlot(kpE2EPlot, ks, NamedProbabilitySeries{}, observedKPE2E, e2eKPYMin, 1.0, PBSThreshold99_99); err != nil {
+	if err := saveKPPlot(kpE2EPlot, ks, NamedProbabilitySeries{}, observedKPE2E, e2eKPYMin, probabilityYMax, PBSThreshold99_99); err != nil {
 		return PlotOutput{}, err
 	}
 	deltaPE2ECSV := filepath.Join(outputDir, "delta_p_e2e.csv")
@@ -224,8 +244,9 @@ func PlotComparisonToDir(
 	// near-1.0 differences between baseline / read_repair / anti_entropy /
 	// hinted_handoff are visually distinguishable.
 	if config.EmitZoomPlot {
-		zoomDeltaYMin := minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPs) - 0.005
-		zoomKPYMin := minSeriesLeft(NamedProbabilitySeries{}, observedKPs) - 0.005
+		// y-axis: start at the minimum y across all observed points.
+		zoomDeltaYMin := minObservedYMin(observedDeltaPs)
+		zoomKPYMin := minObservedYMin(observedKPs)
 		if zoomDeltaYMin < 0 {
 			zoomDeltaYMin = 0
 		}
@@ -239,11 +260,11 @@ func PlotComparisonToDir(
 		// Pass threshold so each observed series gets a "first crosses 99.99%"
 		// annotation (vertical drop-line + label) for at-a-glance comparison.
 		deltaZoom := filepath.Join(outputDir, "delta_p_zoom.png")
-		if err := saveDeltaPlot(deltaZoom, deltas, NamedProbabilitySeries{}, observedDeltaPs, zoomDeltaYMin, 1.0, PBSThreshold99_99); err != nil {
+		if err := saveDeltaPlot(deltaZoom, deltas, NamedProbabilitySeries{}, observedDeltaPs, zoomDeltaYMin, probabilityYMax, PBSThreshold99_99); err != nil {
 			return PlotOutput{}, err
 		}
 		kpZoom := filepath.Join(outputDir, "k_p_zoom.png")
-		if err := saveKPPlot(kpZoom, ks, NamedProbabilitySeries{}, observedKPs, zoomKPYMin, 1.0, PBSThreshold99_99); err != nil {
+		if err := saveKPPlot(kpZoom, ks, NamedProbabilitySeries{}, observedKPs, zoomKPYMin, probabilityYMax, PBSThreshold99_99); err != nil {
 			return PlotOutput{}, err
 		}
 		out.DeltaPZoomPath = deltaZoom
@@ -254,22 +275,22 @@ func PlotComparisonToDir(
 }
 
 // resolveYRange returns the (min, max) to use for a plot's y-axis given the
-// user override (<=0 means "auto") and the auto-fit floor.
+// user override (<=0 means "auto") and the auto-fit floor. The max is always
+// probabilityYMax (1.0); yMax is ignored so P plots stay on [0,1].
 func resolveYRange(yMin, yMax, autoMin float64) (float64, float64) {
+	_ = yMax
 	resolvedMin := autoMin
 	if yMin > 0 {
 		resolvedMin = yMin
 	}
-	resolvedMax := 1.0
-	if yMax > 0 {
-		resolvedMax = yMax
-	}
-	if resolvedMin >= resolvedMax {
-		// guard against caller passing a degenerate range
+	if resolvedMin >= probabilityYMax {
+		// guard against a degenerate range
 		resolvedMin = autoMin
-		resolvedMax = 1.0
 	}
-	return resolvedMin, resolvedMax
+	if resolvedMin < 0 {
+		resolvedMin = 0
+	}
+	return resolvedMin, probabilityYMax
 }
 
 // probabilities extracts the Probability field from each SimulationResult.
@@ -297,13 +318,28 @@ func minSeriesLeft(predicted NamedProbabilitySeries, observed []NamedProbability
 	return m
 }
 
+// minObservedYMin returns the minimum probability value across all points of all
+// observed series (e.g. for zoom plots where we want the y floor at the data's
+// global minimum, not only the first delta or K sample).
+func minObservedYMin(observed []NamedProbabilitySeries) float64 {
+	m := 1.0
+	for _, s := range observed {
+		for _, v := range s.Values {
+			if v < m {
+				m = v
+			}
+		}
+	}
+	return m
+}
+
 func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries, yMin, yMax, threshold float64) error {
+	_ = yMax
 	p := plot.New()
 	p.Title.Text = "Delta-P"
 	p.X.Label.Text = "Delta (ms)"
 	p.Y.Label.Text = "Probability"
-	p.Y.Min = yMin
-	p.Y.Max = yMax
+	p.Y.Min, p.Y.Max = ensureProbabilityYSpan(yMin)
 
 	// predicted line (skip when caller passed an empty series, e.g. zoom plot
 	// that intentionally omits the predicted curve to declutter the view).
@@ -331,7 +367,7 @@ func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabili
 	// Threshold annotation: horizontal dashed line at y=threshold plus a
 	// vertical drop-line + text label at the first delta where each observed
 	// series crosses the threshold.
-	if threshold > 0 && yMin < threshold && threshold <= yMax {
+	if threshold > 0 && yMin < threshold && threshold <= probabilityYMax {
 		xMin := durationToMilliseconds(deltas[0])
 		xMax := durationToMilliseconds(deltas[len(deltas)-1])
 		if err := addThresholdLine(p, xMin, xMax, threshold); err != nil {
@@ -357,12 +393,12 @@ func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabili
 }
 
 func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observed []NamedProbabilitySeries, yMin, yMax, threshold float64) error {
+	_ = yMax
 	p := plot.New()
 	p.Title.Text = "K-P"
 	p.X.Label.Text = "K"
 	p.Y.Label.Text = "Probability"
-	p.Y.Min = yMin
-	p.Y.Max = yMax
+	p.Y.Min, p.Y.Max = ensureProbabilityYSpan(yMin)
 
 	// predicted line (skip when caller passed an empty series, e.g. zoom plot
 	// that intentionally omits the predicted curve to declutter the view).
@@ -390,7 +426,7 @@ func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observe
 	// Threshold annotation; same idea as saveDeltaPlot but K is discrete
 	// so we report the smallest *integer* K at which the series crosses
 	// the threshold (no interpolation makes sense for K-regularity).
-	if threshold > 0 && yMin < threshold && threshold <= yMax {
+	if threshold > 0 && yMin < threshold && threshold <= probabilityYMax {
 		xMin := float64(ks[0])
 		xMax := float64(ks[len(ks)-1])
 		if err := addThresholdLine(p, xMin, xMax, threshold); err != nil {

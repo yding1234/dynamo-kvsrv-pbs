@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"sort"
 	"time"
-	"slices"
 )
 
 type SimulationConfig struct {
@@ -20,14 +20,13 @@ type SimulationConfig struct {
 	RNG         *rand.Rand // random number generator
 
 	// Plot rendering knobs (orthogonal to the WARS simulator itself).
-	// YMin / YMax control the main delta_p.png and k_p.png y-axis bounds.
-	//   <= 0  -> auto-fit (predicted + observed for delta, observed-only for k).
+	// YMin sets the main delta_p.png and k_p.png y-axis lower bound; <=0
+	// means auto. YMax is ignored: probability plots always use y=1.0 on top.
 	YMin float64
 	YMax float64
 	// EmitZoomPlot, when true, additionally writes delta_p_zoom.png and
-	// k_p_zoom.png whose y-axis is auto-fit to observed series only,
-	// stretching the high-P region where read-repair / anti-entropy /
-	// hinted-handoff curves live.
+	// k_p_zoom.png: y is still 0..1, but the lower bound is auto-fit to
+	// observed data to stretch the high-P region.
 	EmitZoomPlot bool
 }
 
@@ -57,7 +56,7 @@ func validateDeltaPConfig(config SimulationConfig) error {
 	return nil
 }
 
-// run the WARS Monte Carlo simulation 
+// run the WARS Monte Carlo simulation
 // and returns the estimated probability of a consistent read after delta time after write commits
 func SimulateDeltaP(config SimulationConfig, samplers WARSSamplers) SimulationResult {
 	if err := validateDeltaPConfig(config); err != nil {
@@ -133,7 +132,6 @@ func firstKIndices(values []time.Duration, k int) []int {
 	return selected
 }
 
-
 func EvaluateDeltaP(trace WARSTrace, config SimulationConfig) SimulationResult {
 	samplers, err := NewWARSSamplers(trace)
 	if err != nil {
@@ -150,7 +148,6 @@ func EvaluateDeltaP(trace WARSTrace, config SimulationConfig) SimulationResult {
 // 	return EvaluateDeltaP(collector.Trace(), config)
 // }
 
-
 func PredictDeltaPSweep(trace WARSTrace, baseConfig SimulationConfig, deltas []time.Duration) []SimulationResult {
 	results := make([]SimulationResult, len(deltas))
 	for i, delta := range deltas {
@@ -162,7 +159,6 @@ func PredictDeltaPSweep(trace WARSTrace, baseConfig SimulationConfig, deltas []t
 	}
 	return results
 }
-
 
 func EvaluateKP(config SimulationConfig) SimulationResult {
 	missSingleWrite := combination(config.NumReplicas-config.WriteQuorum, config.ReadQuorum) / combination(config.NumReplicas, config.ReadQuorum)

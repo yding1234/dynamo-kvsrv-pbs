@@ -1,8 +1,10 @@
 package kvsrv
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
+	"hash/crc32"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -53,7 +55,7 @@ type PBSDemoScenario struct {
 }
 
 type PBSDemoOptions struct {
-	OutputDir 	     string
+	OutputDir        string
 	Keys             []string
 	WorkloadDuration time.Duration
 	NumWriters       int
@@ -70,9 +72,9 @@ type PBSDemoOptions struct {
 	// UnreliableNetwork enables labrpc's reliable=false mode: ~10% request
 	// drops, ~10% reply drops, and a small per-message random delay.
 	UnreliableNetwork bool
-	// LongReordering enables labrpc's longReordering mode: ~60% of replies
-	// are delayed by 200~2000ms. Only meaningful when UnreliableNetwork
-	// is also true
+	// LongReordering enables labrpc's longReordering mode (Pareto long-tail
+	// delay on a fraction of replies). Works with or without UnreliableNetwork;
+	// drops and short delay only apply when UnreliableNetwork is true.
 	LongReordering bool
 	// RandomCoordinator picks a fresh coordinator (uniformly from the key's
 	// preference list) for each request. When false, every request goes to
@@ -80,14 +82,48 @@ type PBSDemoOptions struct {
 	// PBS paper's symmetric assumption; sticky exposes the "coordinator-as-
 	// replica locality bias" that drives observe > predict.
 	RandomCoordinator bool
-	PlotConfig        kvsrv_eval.SimulationConfig
-	Scenarios         []PBSDemoScenario
+	// The following options apply when FailureMode is single_dead_replica. All
+	// are measured from the start of the scenario (before the steady-state
+	// workload) unless described otherwise.
+	//
+	// Legacy quick path: FailureStartAfter, FailureDownDuration, FailureUpDuration,
+	// and FailureRecoverAfter are all zero => mark the candidate replica dead
+	// once at startup (before the initial value write) and keep it dead for the
+	// full -duration.
+	//
+	// FailureStartAfter: wait this long (all replicas alive) before the first
+	// mark(Dead) when any timed failure option is set.
+	//
+	// FailureDownDuration: in each "down" phase, stay dead for this long. When
+	// non-zero, recovery comes after D from mark(Dead), not at FailureRecoverAfter.
+	//
+	// FailureUpDuration: after a down→up, stay alive for this long then mark
+	// dead again. When >0, FailureDownDuration must be >0; phases repeat until
+	// the scenario ends.
+	//
+	// FailureRecoverAfter: if FailureDownDuration==0 and this is >0, mark dead
+	// as soon as the timed path begins (or after FailureStartAfter), and mark
+	// alive at this absolute time from scenario start. Ignored if
+	// FailureDownDuration>0. Requires FailureRecoverAfter>FailureStartAfter
+	// when FailureStartAfter>0.
+	FailureStartAfter   time.Duration
+	FailureDownDuration time.Duration
+	FailureUpDuration   time.Duration
+	FailureRecoverAfter time.Duration
+	// DeadReplicaPickSeed seeds which replica in the key's preference list is
+	// taken down in single_dead_replica (all scenarios in one RunPBSDemo share
+	// the same draw). 0 means derive a deterministic seed from the first key
+	// and cluster shape; kvsrv1pbsplot sets this to the same -seed as the
+	// simulation RNG.
+	DeadReplicaPickSeed int64
+	PlotConfig          kvsrv_eval.SimulationConfig
+	Scenarios           []PBSDemoScenario
 }
 
 func DefaultPBSDemoOptions() PBSDemoOptions {
 	return PBSDemoOptions{
 		OutputDir:        ".",
-		Keys:              []string{"pbs-demo-key"},
+		Keys:             []string{"pbs-demo-key"},
 		WorkloadDuration: 30 * time.Second,
 		NumWriters:       1,
 		SleepBetweenOps:  10 * time.Millisecond,
@@ -97,8 +133,8 @@ func DefaultPBSDemoOptions() PBSDemoOptions {
 
 		// ProbeReadsPerWrite: 0,
 		NumNodes:          5,
-		UnreliableNetwork: false,
-		LongReordering:    false,
+		UnreliableNetwork: true,
+		LongReordering:    true,
 		RandomCoordinator: true,
 		PlotConfig: kvsrv_eval.SimulationConfig{
 			NumReplicas:  3,
@@ -125,7 +161,8 @@ func DefaultPBSDemoScenarios() []PBSDemoScenario {
 			EnableReadRepair:    false,
 			EnableAntiEntropy:   false,
 			EnableHintedHandoff: false,
-			FailureMode:         "none",
+			FailureMode:         "single_dead_replica",
+			// FailureMode:         "none",
 		},
 		{
 			Name:                "observe_read_repair",
@@ -133,7 +170,8 @@ func DefaultPBSDemoScenarios() []PBSDemoScenario {
 			EnableReadRepair:    true,
 			EnableAntiEntropy:   false,
 			EnableHintedHandoff: false,
-			FailureMode:         "none",
+			FailureMode:         "single_dead_replica",
+			// FailureMode:         "none",
 		},
 		{
 			Name:                "observe_anti_entropy",
@@ -141,17 +179,18 @@ func DefaultPBSDemoScenarios() []PBSDemoScenario {
 			EnableReadRepair:    false,
 			EnableAntiEntropy:   true,
 			EnableHintedHandoff: false,
-			FailureMode:         "none",
+			FailureMode:         "single_dead_replica",
+			// FailureMode:         "none",
 		},
-		// {
-		// 	Name:                "observe_hinted_handoff",
-		// 	Label:               "observe_hinted_handoff",
-		// 	EnableReadRepair:    false,
-		// 	EnableAntiEntropy:   false,
-		// 	EnableHintedHandoff: true,
-		// 	//FailureMode:         "single_dead_replica",
-		// 	FailureMode:         "none",
-		// },
+		{
+			Name:                "observe_hinted_handoff",
+			Label:               "observe_hinted_handoff",
+			EnableReadRepair:    false,
+			EnableAntiEntropy:   false,
+			EnableHintedHandoff: true,
+			FailureMode:         "single_dead_replica",
+			// FailureMode:         "none",
+		},
 	}
 }
 
@@ -182,6 +221,9 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	if opts.NumNodes <= 0 {
 		return PBSDemoResult{}, fmt.Errorf("NumNodes must be > 0")
 	}
+	if err := validatePBSDemoFailureOptions(&opts); err != nil {
+		return PBSDemoResult{}, err
+	}
 	if len(opts.Scenarios) == 0 {
 		opts.Scenarios = DefaultPBSDemoScenarios()
 	}
@@ -202,8 +244,18 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	statsByScenario := make(map[string]PBSDemoStats, len(opts.Scenarios))
 	var baselineCollector *kvsrv_eval.PBSCollector // TODO: make this a Series
 
+	var preselectedSingleDeadID string
+	if scenariosUseSingleDeadReplica(opts.Scenarios) {
+		ring := makePBSDemoHashRing(opts)
+		pick, err := selectSingleDeadReplicaID(opts.Keys[0], ring, PBSDemoScenario{FailureMode: "single_dead_replica"}, deadReplicaPickRng(&opts))
+		if err != nil {
+			return PBSDemoResult{}, err
+		}
+		preselectedSingleDeadID = pick
+	}
+
 	for _, scenario := range opts.Scenarios {
-		collector, stats, err := runPBSDemoScenario(opts, scenario)
+		collector, stats, err := runPBSDemoScenario(opts, scenario, preselectedSingleDeadID)
 		if err != nil {
 			return PBSDemoResult{}, fmt.Errorf("%s: %w", scenario.Name, err)
 		}
@@ -298,7 +350,7 @@ func RunPBSDemo(opts PBSDemoOptions) (PBSDemoResult, error) {
 	}, nil
 }
 
-func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_eval.PBSCollector, PBSDemoStats, error) {
+func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario, preselectedSingleDeadID string) (*kvsrv_eval.PBSCollector, PBSDemoStats, error) {
 	// One collector for the whole cluster: every node writes PBS samples
 	// into the same pool, so randomized coordinators don't fragment data.
 	sharedCollector := kvsrv_eval.NewPBSCollector()
@@ -382,9 +434,28 @@ func runPBSDemoScenario(opts PBSDemoOptions, scenario PBSDemoScenario) (*kvsrv_e
 	// dead replica may or may not be in the prefList of the *other* keys,
 	// which is fine: it just means hinted-handoff scenarios exercise a
 	// subset of the working set rather than all of it.
-	if err := configurePBSDemoScenarioFailure(opts.Keys[0], ring, servers, scenario); err != nil {
-		return nil, PBSDemoStats{}, err
+	var replicaID string
+	if scenario.FailureMode == "single_dead_replica" {
+		replicaID = preselectedSingleDeadID
 	}
+	legacyAlwaysDead := replicaID != "" && opts.FailureStartAfter == 0 && opts.FailureDownDuration == 0 && opts.FailureUpDuration == 0 && opts.FailureRecoverAfter == 0
+	var failureCancel context.CancelFunc
+	if replicaID != "" {
+		if legacyAlwaysDead {
+			for _, s := range servers {
+				s.markMemberStatus(replicaID, rpc.Dead)
+			}
+		} else {
+			var cctx context.Context
+			cctx, failureCancel = context.WithCancel(context.Background())
+			go pbsSingleReplicaFailureLoop(cctx, opts, replicaID, servers)
+		}
+	}
+	defer func() {
+		if failureCancel != nil {
+			failureCancel()
+		}
+	}()
 
 	// set atomatic counters for the stats
 	var writeOK atomic.Int64
@@ -668,24 +739,143 @@ func writePBSDemoStatsCSV(path string, statsByScenario map[string]PBSDemoStats) 
 	return writer.Error()
 }
 
-func configurePBSDemoScenarioFailure(key string, ring *chr.ConsistentHashRing, servers map[string]*KVServer, scenario PBSDemoScenario) error {
+func scenariosUseSingleDeadReplica(scenarios []PBSDemoScenario) bool {
+	for _, s := range scenarios {
+		if s.FailureMode == "single_dead_replica" {
+			return true
+		}
+	}
+	return false
+}
+
+// makePBSDemoHashRing builds the same hash ring as makePBSDemoCluster (for
+// selecting a key's preference list before any labrpc/servers are created).
+func makePBSDemoHashRing(o PBSDemoOptions) *chr.ConsistentHashRing {
+	nodeIDs := make([]string, 0, o.NumNodes)
+	for i := 0; i < o.NumNodes; i++ {
+		nodeIDs = append(nodeIDs, tester.ServerName(tester.GRP0, i))
+	}
+	return chr.MakeConsistentHashRing(o.PlotConfig.NumReplicas, pbsDemoNumSectors, o.NumNodes, nodeIDs)
+}
+
+func deadReplicaPickRng(o *PBSDemoOptions) *rand.Rand {
+	var seed int64
+	if o.DeadReplicaPickSeed != 0 {
+		seed = o.DeadReplicaPickSeed
+	} else {
+		// Deterministic from first key and topology when seed not set (API users).
+		h := uint64(crc32.ChecksumIEEE([]byte(o.Keys[0])))
+		h ^= uint64(o.NumNodes) * 0x9e37_79b9_7f4a7c15
+		h ^= uint64(o.PlotConfig.NumReplicas) << 8
+		seed = int64(h)
+	}
+	return rand.New(rand.NewSource(seed))
+}
+
+// selectSingleDeadReplicaID returns the replica id to fail for
+// single_dead_replica, or "" if no failure is configured. The dead node is
+// chosen uniformly at random from the key's preference list; use
+// deadReplicaPickRng for a reproducible draw independent of PlotConfig.RNG.
+func selectSingleDeadReplicaID(key string, ring *chr.ConsistentHashRing, scenario PBSDemoScenario, rng *rand.Rand) (string, error) {
 	if scenario.FailureMode == "" || scenario.FailureMode == "none" {
-		return nil
+		return "", nil
 	}
-	switch scenario.FailureMode {
-	case "single_dead_replica":
-		prefList := ring.GetPreferenceList(key)
-		if len(prefList) < 2 {
-			return fmt.Errorf("need at least 2 replicas for hinted handoff scenario")
-		}
-		deadReplica := prefList[len(prefList)-1]
-		for _, server := range servers {
-			server.markMemberStatus(deadReplica, rpc.Dead)
-		}
-		return nil
-	default:
-		return fmt.Errorf("unsupported failure mode %q", scenario.FailureMode)
+	if scenario.FailureMode != "single_dead_replica" {
+		return "", fmt.Errorf("unsupported failure mode %q", scenario.FailureMode)
 	}
+	prefList := ring.GetPreferenceList(key)
+	if len(prefList) < 2 {
+		return "", fmt.Errorf("need at least 2 replicas for single_dead_replica")
+	}
+	if rng == nil {
+		rng = rand.New(rand.NewSource(7))
+	}
+	return prefList[rng.Intn(len(prefList))], nil
+}
+
+func validatePBSDemoFailureOptions(opts *PBSDemoOptions) error {
+	if opts.FailureUpDuration > 0 && opts.FailureDownDuration <= 0 {
+		return fmt.Errorf("FailureUpDuration requires FailureDownDuration > 0 (repeatable dead/healthy loop)")
+	}
+	if opts.FailureStartAfter > 0 && opts.FailureRecoverAfter > 0 && opts.FailureDownDuration == 0 {
+		if opts.FailureRecoverAfter <= opts.FailureStartAfter {
+			return fmt.Errorf("FailureRecoverAfter (%v) must be after FailureStartAfter (%v)", opts.FailureRecoverAfter, opts.FailureStartAfter)
+		}
+	}
+	return nil
+}
+
+// pbsSingleReplicaFailureLoop runs the single-replica down/up timeline until ctx
+// is cancelled (scenario end). The replica starts Alive; the initial write runs
+// while Alive when FailureStartAfter > 0.
+func pbsSingleReplicaFailureLoop(ctx context.Context, opts PBSDemoOptions, replicaID string, servers map[string]*KVServer) {
+	mark := func(st rpc.NodeStatus) {
+		for _, s := range servers {
+			s.markMemberStatus(replicaID, st)
+		}
+	}
+	sleep := func(d time.Duration) error {
+		if d <= 0 {
+			return nil
+		}
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		}
+	}
+
+	t0 := time.Now()
+	S := opts.FailureStartAfter
+	D := opts.FailureDownDuration
+	U := opts.FailureUpDuration
+	R := opts.FailureRecoverAfter
+
+	// On scenario end, re-mark the replica Alive so the cluster is left
+	// consistent for any follow-on logic.
+	defer mark(rpc.Alive)
+
+	if err := sleep(S); err != nil {
+		return
+	}
+
+	// Repeating down/up cycles: ... dead D ... up U ... dead D ...
+	if U > 0 {
+		for {
+			mark(rpc.Dead)
+			if err := sleep(D); err != nil {
+				return
+			}
+			mark(rpc.Alive)
+			if err := sleep(U); err != nil {
+				return
+			}
+		}
+	}
+
+	// One-shot or legacy absolute recover
+	mark(rpc.Dead)
+	if D > 0 {
+		if err := sleep(D); err != nil {
+			return
+		}
+	} else if R > 0 {
+		rem := time.Until(t0.Add(R))
+		if rem < 0 {
+			rem = 0
+		}
+		if err := sleep(rem); err != nil {
+			return
+		}
+	} else {
+		// Dead until scenario ends
+		<-ctx.Done()
+		return
+	}
+	mark(rpc.Alive)
 }
 
 func demoPut(coordinator *KVServer, key string, value string, baseCtx rpc.Context) (rpc.Err, rpc.Context, error) {

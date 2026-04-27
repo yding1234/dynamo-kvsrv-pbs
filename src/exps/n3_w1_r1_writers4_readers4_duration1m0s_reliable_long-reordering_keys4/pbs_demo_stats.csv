@@ -1,0 +1,4 @@
+scenario,write_ok,write_err_version,write_quorum_retry,write_other_err,read_ok,read_no_key,read_quorum_retry,read_err,refresh_ok,refresh_err
+observe_baseline,21727,0,0,0,79631,0,0,0,0,0
+observe_read_repair,21525,0,0,0,78393,1,0,0,0,0
+observe_anti_entropy,21590,0,0,0,78726,5,0,0,0,0

@@ -61,12 +61,22 @@ import "time"
 import "sync/atomic"
 
 const (
-	SHORTDELAY        = 8    // ms
-	LONGDELAY         = 7000 // ms
+	SHORTDELAY        = 5    // ms
+	LONGDELAY         = 3000 // ms
 	MAXDELAY          = LONGDELAY + 100
-	LONGTAILBASEDELAY = 200 // ms
-	LONGTAILMINDELAY  = 100 // ms
+	LONGTAILBASEDELAY = 25 // ms
+	LONGTAILMINDELAY  = 50 // ms
 	LONGTAILSHAPE     = 1.5 // Pareto alpha; smaller means a heavier tail.
+	// UnreliableDropPermille: when Network.Reliable(false) ("unreliable" mode),
+	// each RPC request and each reply is dropped independently with
+	// UnreliableDropPermille/1000 probability. 30 -> 3%. When Reliable(true),
+	// there is no random drop and no short delay in processReq.
+	UnreliableDropPermille = 30
+	// LongReorderPermille: when LongReordering(true), each reply is Pareto-delayed
+	// (long tail) with this probability in permille. Independent of Reliable:
+	// both reliable and unreliable networks can use long reordering; drops only
+	// apply when Reliable(false).
+	LongReorderPermille = 10
 )
 
 func longTailDelayMs(minMs int) int {
@@ -314,14 +324,12 @@ func (rn *Network) processReq(req reqMsg) {
 	//log.Printf("processReq %v %v name %v %v", req.endname, enabled, servername, server)
 
 	if enabled && servername != nil && server != nil {
-		if reliable == false {
-			// short delay
-			ms := (rand.Int() % SHORTDELAY)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		}
+		// short delay
+		ms := (rand.Int() % SHORTDELAY)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 
-		// change the drop rate to 3%
-		if reliable == false && (rand.Int()%1000) < 30 {
+		// Unreliable: 3% request drop. Reliable: no drop.
+		if reliable == false && (rand.Int()%1000) < UnreliableDropPermille {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
 			return
@@ -368,23 +376,29 @@ func (rn *Network) processReq(req reqMsg) {
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
 			req.replyCh <- replyMsg{false, nil}
-		} else if reliable == false && (rand.Int()%1000) < 30 { // change drop rate to 3%
-			// drop the reply, return as if timeout
-			req.replyCh <- replyMsg{false, nil}
-		} else if longreordering == true && rand.Intn(1000) < 30 { //change long delay rate to 3%
-			// Long-tail latency: most delayed replies are modest, but a few
-			// hit the LONGDELAY cap.
-			ms := longTailDelayMs(LONGTAILBASEDELAY)
-			// Russ points out that this timer arrangement will decrease
-			// the number of goroutines, so that the race
-			// detector is less likely to get upset.
-			time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+		} else {
+			// Two independent post-handler behaviors:
+			// 1) Unreliable-only: random reply drop.
+			// 2) Long-reorder: Pareto delay, independent of Reliable (1 does not
+			//    require 2; if both are "active", drop is decided first by design).
+			dropReply := !reliable && (rand.Int()%1000) < UnreliableDropPermille
+			longDelay := longreordering && rand.Intn(1000) < LongReorderPermille
+			switch {
+			case dropReply:
+				req.replyCh <- replyMsg{false, nil}
+			case longDelay:
+				ms := longTailDelayMs(LONGTAILBASEDELAY)
+				// Russ points out that this timer arrangement will decrease
+				// the number of goroutines, so that the race
+				// detector is less likely to get upset.
+				time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+					atomic.AddInt64(&rn.bytes, int64(len(reply.reply)))
+					req.replyCh <- reply
+				})
+			default:
 				atomic.AddInt64(&rn.bytes, int64(len(reply.reply)))
 				req.replyCh <- reply
-			})
-		} else {
-			atomic.AddInt64(&rn.bytes, int64(len(reply.reply)))
-			req.replyCh <- reply
+			}
 		}
 	} else {
 		// simulate no reply and eventual timeout.
