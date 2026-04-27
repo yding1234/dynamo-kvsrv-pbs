@@ -1,5 +1,5 @@
 scenario,write_ok,write_err_version,write_quorum_retry,write_other_err,read_ok,read_no_key,read_quorum_retry,read_err,refresh_ok,refresh_err
-observe_baseline,4569,1,44,0,10651,0,253,0,43,0
-observe_read_repair,4435,0,38,0,10736,0,289,0,38,0
-observe_anti_entropy,4326,0,48,0,10939,0,236,0,46,0
-observe_hinted_handoff,3464,27,448,0,6832,0,929,0,415,4
+observe_baseline,2961,32,1141,0,5856,0,1687,0,366,7
+observe_read_repair,4436,1,38,0,11296,0,303,0,37,0
+observe_anti_entropy,4644,1,43,0,9844,0,258,0,42,0
+observe_hinted_handoff,4311,0,90,0,10224,0,276,0,78,0

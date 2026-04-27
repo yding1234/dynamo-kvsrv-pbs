@@ -14,6 +14,9 @@ func (kv *KVServer) StartSyncMembers() {
 		for {
 			select {
 			case <-ticker.C:
+				if kv.pbsDemoPauseMembershipGoss.Load() {
+					continue
+				}
 				kv.bumpLocalHeartbeat()
 				kv.SyncMembers()
 			case <-kv.stopCh:
@@ -21,6 +24,12 @@ func (kv *KVServer) StartSyncMembers() {
 			}
 		}
 	}()
+}
+
+// SetPBSDemoPauseMembershipGoss pauses StartSyncMembers tick work (no self-
+// heartbeat/gossip) while the PBS demo simulates this node as unreachable.
+func (kv *KVServer) SetPBSDemoPauseMembershipGoss(pause bool) {
+	kv.pbsDemoPauseMembershipGoss.Store(pause)
 }
 
 func (kv *KVServer) StartMembershipFailureDetector() {
@@ -120,14 +129,14 @@ func (kv *KVServer) detectMemberFailures() {
 		}
 		since := now.Sub(lastUpdated)
 		switch {
-			case since >= kv.cleanupTimeout:
-				if member.Status != rpc.Dead {
-					kv.UpdateMemberInfo(serverID, member.Heartbeat, rpc.Dead)
-				}
-			case since >= kv.failureTimeout:
-				if member.Status == rpc.Alive {
-					kv.UpdateMemberInfo(serverID, member.Heartbeat, rpc.Suspect)
-				}
+		case since >= kv.cleanupTimeout:
+			if member.Status != rpc.Dead {
+				kv.UpdateMemberInfo(serverID, member.Heartbeat, rpc.Dead)
+			}
+		case since >= kv.failureTimeout:
+			if member.Status == rpc.Alive {
+				kv.UpdateMemberInfo(serverID, member.Heartbeat, rpc.Suspect)
+			}
 		}
 	}
 }
@@ -170,7 +179,6 @@ func (kv *KVServer) GetAllMembers() []rpc.MemberInfo {
 	return memberInfos
 }
 
-
 func (kv *KVServer) isInPreferenceList(key string) bool {
 	for _, id := range kv.ring.GetPreferenceList(key) {
 		if id == kv.id {
@@ -194,6 +202,3 @@ func (kv *KVServer) filterDeadMembers(serverIDs []string) []string {
 	}
 	return filtered
 }
-
-
-

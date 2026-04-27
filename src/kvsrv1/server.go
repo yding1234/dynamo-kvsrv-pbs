@@ -3,6 +3,7 @@ package kvsrv
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"6.5840/chr"
@@ -21,7 +22,7 @@ var defaultHeartbeatTimeout = 1000 * time.Millisecond
 var defaultFailureTimeout = 5000 * time.Millisecond // per 100 writes
 var defaultCleanupTimeout = 15000 * time.Millisecond
 var defaultHintedHandoffInterval = 2000 * time.Millisecond // per 200 writes
-var defaultMerkleRefreshInterval = 500 * time.Millisecond // per 50 writes
+var defaultMerkleRefreshInterval = 500 * time.Millisecond  // per 50 writes
 var defaultMerkleRefreshJitterRatio = 0.3
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -77,8 +78,8 @@ type KVServer struct {
 	// dirtySectors is the set of sectors whose merkle tree is known to
 	// be stale. The background merkle refresherdrains this set and rebuilds each sector's tree off the hot path.
 	// Guarded by dirtyMu.
-	dirtySectors          map[int]struct{}
-	merkleRefreshInterval time.Duration
+	dirtySectors             map[int]struct{}
+	merkleRefreshInterval    time.Duration
 	merkleRefreshJitterRatio float64
 
 	// membership
@@ -101,38 +102,42 @@ type KVServer struct {
 	// feature toggles used by the PBS demo to compare mechanisms.
 	readRepairEnabled    bool
 	hintedHandoffEnabled bool
+
+	// If set by the PBS demo while a node is the synthetic "down" victim,
+	// StartSyncMembers skips its ticker so the node does not bump itself Alive.
+	pbsDemoPauseMembershipGoss atomic.Bool
 }
 
 func MakeKVServer(serverID string, ring *chr.ConsistentHashRing,
 	writeQuorum int, readQuorum int, ends map[string]*labrpc.ClientEnd) *KVServer {
 	kv := &KVServer{id: serverID,
-		kv:                     make(map[string][]rpc.Object),
-		ring:                   ring,
-		writeQuorum:            writeQuorum,
-		readQuorum:             readQuorum,
-		ends:                   ends,
-		merkleRoots:            make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
-		keysInBuckets:          make([][][]string, ring.NumSectors()),
-		antiEntropyInterval:    defaultAntiEntropyInterval,
-		antiEntropyJitterRatio: defaultAntiEntropyJitterRatio,
-		stopCh:                 make(chan struct{}),
-		members:                make(map[string]rpc.MemberInfo, len(ends)),
-		memberLastUpdated:      make(map[string]time.Time, len(ends)),
-		numNeighbors:           2,
-		heartbeatTimeout:       defaultHeartbeatTimeout,
-		gossipInterval:         defaultGossipInterval,
-		failureTimeout:         defaultFailureTimeout,
-		cleanupTimeout:         defaultCleanupTimeout,
-		hints:                  make(map[string][]rpc.PutArgs),
-		hintedHandoffInterval:  defaultHintedHandoffInterval,
-		collector:              kvsrv_eval.NewPBSCollector(),
-		readRepairEnabled:      true,
-		hintedHandoffEnabled:   true,
-		dirtySectors:           make(map[int]struct{}),
-		merkleRefreshInterval:  defaultMerkleRefreshInterval,
+		kv:                       make(map[string][]rpc.Object),
+		ring:                     ring,
+		writeQuorum:              writeQuorum,
+		readQuorum:               readQuorum,
+		ends:                     ends,
+		merkleRoots:              make(map[int]*MerkleNode, len(ring.GetSectors(serverID))),
+		keysInBuckets:            make([][][]string, ring.NumSectors()),
+		antiEntropyInterval:      defaultAntiEntropyInterval,
+		antiEntropyJitterRatio:   defaultAntiEntropyJitterRatio,
+		stopCh:                   make(chan struct{}),
+		members:                  make(map[string]rpc.MemberInfo, len(ends)),
+		memberLastUpdated:        make(map[string]time.Time, len(ends)),
+		numNeighbors:             2,
+		heartbeatTimeout:         defaultHeartbeatTimeout,
+		gossipInterval:           defaultGossipInterval,
+		failureTimeout:           defaultFailureTimeout,
+		cleanupTimeout:           defaultCleanupTimeout,
+		hints:                    make(map[string][]rpc.PutArgs),
+		hintedHandoffInterval:    defaultHintedHandoffInterval,
+		collector:                kvsrv_eval.NewPBSCollector(),
+		readRepairEnabled:        true,
+		hintedHandoffEnabled:     true,
+		dirtySectors:             make(map[int]struct{}),
+		merkleRefreshInterval:    defaultMerkleRefreshInterval,
 		merkleRefreshJitterRatio: defaultMerkleRefreshJitterRatio,
-		readRepairJobCh:        make(chan *readRepairJob, readRepairQueueCapacity),
-		readRepairCoalesce:     make(map[string]*readRepairCoalesceEntry),
+		readRepairJobCh:          make(chan *readRepairJob, readRepairQueueCapacity),
+		readRepairCoalesce:       make(map[string]*readRepairCoalesceEntry),
 	}
 
 	for i := 0; i < ring.NumSectors(); i++ {
@@ -179,7 +184,6 @@ func (kv *KVServer) CoordGet(args *rpc.GetArgs, reply *rpc.GetReply) {
 	startedAt := time.Now()
 	// kv.coordMu.Lock()
 	// defer kv.coordMu.Unlock()
-
 
 	if !kv.isInPreferenceList(args.Key) {
 		reply.Err = rpc.ErrNotCoordinator
@@ -409,7 +413,6 @@ func (kv *KVServer) CoordPut(args *rpc.PutArgs, reply *rpc.PutReply) {
 		reply.Err = rpc.ErrWriteQuorumNotMet
 	}
 }
-
 
 func drainForwardGetResults(ch <-chan rpc.ForwardGetResult, remaining int) {
 	for i := 0; i < remaining; i++ {
@@ -648,7 +651,6 @@ func (kv *KVServer) installObjects(key string, objects []rpc.Object) {
 	kv.mu.Unlock()
 	kv.markSectorDirty(sector)
 }
-
 
 func (kv *KVServer) mergeObjects(key string, incoming []rpc.Object) []rpc.Object {
 	return kv.mergeObjectsCore(key, incoming, true)

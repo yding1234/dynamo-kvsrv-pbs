@@ -71,9 +71,9 @@ type SeriesConfig struct {
 type CollectorSeries struct {
 	Config    SeriesConfig
 	Collector *PBSCollector
-	// ReadAttempts is total read attempts for end-to-end probability
-	// (non-stale reads / all attempts). When <=0, observed curves fall back
-	// to successful-read denominator.
+	// ReadAttempts is the denominator for E2E: every read RPC in the workload
+	// (not only the reader’s outcome buckets). When <=0, E2E falls back to
+	// a successful-read-only fraction.
 	ReadAttempts int64
 }
 

@@ -41,6 +41,7 @@ func main() {
 	failureDownDuration := flag.Duration("failure-down-duration", 0, "length of each dead interval; with -failure-up-duration>0, cycles dead then alive; if 0, use -failure-recover-after for a single absolute recover time")
 	failureUpDuration := flag.Duration("failure-up-duration", 0, "healthy time between a recover and the next down; >0 requires -failure-down-duration>0, repeats until -duration")
 	failureRecoverAfter := flag.Duration("failure-recover-after", 0, "if -failure-down-duration is 0, mark alive at this time from scenario start (must be > -failure-start-after if that is set); 0 and no other timing flags = original stay-dead for full -duration")
+	failureOverlap := flag.Duration("failure-overlap", 0, "with single_dead_replica and -failure-up-duration>0: time window where consecutive dead nodes are both down (requires -failure-down-duration > this; next down starts d-overlap after current down)")
 	numKeys := flag.Int("num-keys", 1, "number of keys to drive workload against; each request picks one uniformly at random. Auto-generated as pbs-demo-key-0..N-1; with N>1 this spreads load across multiple preference lists")
 	keyPrefix := flag.String("key-prefix", "pbs-demo-key", "prefix for auto-generated keys when -num-keys > 1")
 	keysList := flag.String("keys", "", "comma-separated explicit key list; overrides -num-keys/-key-prefix when set (e.g. \"alpha,beta,gamma\")")
@@ -50,7 +51,7 @@ func main() {
 	opts.Keys = resolveKeys(*keysList, *keyPrefix, *numKeys)
 	opts.OutputDir = filepath.Join(*outputDir, experimentDirName(
 		*numReplicas, *writeQuorum, *readQuorum, *numWriters, *numReaders,
-		*workloadDuration, *unreliable, *longReordering, len(opts.Keys), failureModeDirTag(opts.Scenarios)))
+		*workloadDuration, *unreliable, *longReordering, len(opts.Keys), failureModeDirTag(opts.Scenarios), *failureOverlap))
 	opts.NumNodes = *numNodes
 	opts.PlotConfig.NumReplicas = *numReplicas
 	opts.PlotConfig.ReadQuorum = *readQuorum
@@ -75,6 +76,7 @@ func main() {
 	opts.FailureDownDuration = *failureDownDuration
 	opts.FailureUpDuration = *failureUpDuration
 	opts.FailureRecoverAfter = *failureRecoverAfter
+	opts.FailureOverlap = *failureOverlap
 	opts.DeadReplicaPickSeed = *seed
 	opts.PlotConfig.RNG = rand.New(rand.NewSource(*seed))
 
@@ -104,11 +106,12 @@ func main() {
 		if !ok {
 			continue
 		}
-		fmt.Printf("stats[%s]: write_ok=%d write_err_version=%d write_quorum_retry=%d write_other_err=%d read_ok=%d read_no_key=%d read_quorum_retry=%d read_err=%d refresh_ok=%d refresh_err=%d\n",
+		fmt.Printf("stats[%s]: write_ok=%d write_err_version=%d write_quorum_retry=%d write_no_key_retry=%d write_other_err=%d read_ok=%d read_no_key=%d read_quorum_retry=%d read_err=%d refresh_ok=%d refresh_err=%d\n",
 			scenario.Name,
 			stats.WriteOK,
 			stats.WriteErrVersion,
 			stats.WriteQuorumRetry,
+			stats.WriteNoKeyRetry,
 			stats.WriteOtherErr,
 			stats.ReadOK,
 			stats.ReadNoKey,
@@ -155,6 +158,7 @@ func sanitizeExperimentToken(s string) string {
 func experimentDirName(
 	numReplicas int, writeQuorum int, readQuorum int, numWriters int, numReaders int,
 	duration time.Duration, unreliable bool, longReordering bool, numKeys int, failureModeTag string,
+	failureOverlap time.Duration,
 ) string {
 	networkMode := "reliable"
 	if unreliable {
@@ -164,6 +168,11 @@ func experimentDirName(
 	if longReordering {
 		reorderingMode = "long-reordering"
 	}
+	olap := ""
+	if failureOverlap > 0 {
+		olap = fmt.Sprintf("_olap%s", failureOverlap)
+		olap = strings.NewReplacer("/", "-", "\\", "-", " ", "", ":", "-").Replace(olap)
+	}
 
 	// Include the key-set size in the dir name so multi-key sweeps don't
 	// silently overwrite single-key runs (and vice versa). 1 key keeps the
@@ -172,8 +181,8 @@ func experimentDirName(
 	// w/r are write/read quorum; writersN/readersM are worker goroutine counts.
 	// fm_ carries failure modes (see failureModeDirTag) so e.g. single_dead
 	// runs don't mix with no-failure renames in the same folder.
-	name := fmt.Sprintf("n%d_w%d_r%d_writers%d_readers%d_duration%s_%s_%s_fm_%s_keys%d",
-		numReplicas, writeQuorum, readQuorum, numWriters, numReaders, duration, networkMode, reorderingMode, failureModeTag, numKeys)
+	name := fmt.Sprintf("n%d_w%d_r%d_writers%d_readers%d_duration%s_%s_%s_fm_%s%s_keys%d",
+		numReplicas, writeQuorum, readQuorum, numWriters, numReaders, duration, networkMode, reorderingMode, failureModeTag, olap, numKeys)
 	return strings.NewReplacer("/", "-", "\\", "-", " ", "").Replace(name)
 }
 

@@ -48,7 +48,11 @@ func ObserveDeltaPSweep(collector *PBSCollector, deltas []time.Duration) []float
 }
 
 // ObserveDeltaPSweepE2E returns end-to-end non-stale probability:
-// non_stale_reads / all_read_attempts.
+//
+//	(# reads in the collector that are delta-regular) / all_read_attempts
+//
+// The collector records successful CoordGet completions; all_read_attempts must
+// count every read RPC (e.g. reader gets + writer refresh gets), not just reader outcome sums.
 // When allReadAttempts <= 0, it falls back to the successful-read denominator.
 func ObserveDeltaPSweepE2E(collector *PBSCollector, deltas []time.Duration, allReadAttempts int64) []float64 {
 	if allReadAttempts <= 0 {
