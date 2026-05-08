@@ -3,8 +3,8 @@ package kvsrv_eval
 import (
 	"time"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/rpc"
+	"dynamo-kvsrv/kvsrv/vclock"
 )
 
 func ObserveDeltaP(reads []CompletedRead, writes []CompletedWrite, delta time.Duration) float64 {

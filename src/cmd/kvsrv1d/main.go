@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"dynamo-kvsrv/kvsrv1"
-	"dynamo-kvsrv/tester1"
+	"dynamo-kvsrv/kvsrv"
+	"dynamo-kvsrv/tester"
 )
 
 func main() {

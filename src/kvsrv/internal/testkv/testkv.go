@@ -1,24 +1,20 @@
-package kvtest
+package testkv
 
 import (
 	"encoding/json"
 	"fmt"
-	//"log"
 	"math/rand"
 	"strconv"
 	"testing"
 	"time"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
-	"dynamo-kvsrv/tester1"
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/rpc"
+	"dynamo-kvsrv/tester"
+	"dynamo-kvsrv/kvsrv/vclock"
 )
 
-// The tester generously allows solutions to complete elections in one second
-// (much more than the paper's range of timeouts).
 const ElectionTimeout = 1 * time.Second
 
-// n specifies the length of the string to be generated.
 func RandValue(n int) string {
 	const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -31,7 +27,7 @@ func RandValue(n int) string {
 
 const testContextNode = "__test__"
 
-func ctx(counter uint64) rpc.Context {
+func Ctx(counter uint64) rpc.Context {
 	vc := vclock.NewVClock()
 	if counter > 0 {
 		vc.SetVersion(testContextNode, counter)
@@ -39,11 +35,11 @@ func ctx(counter uint64) rpc.Context {
 	return rpc.NewContextFromVClock(vc)
 }
 
-func zeroContext() rpc.Context {
+func ZeroContext() rpc.Context {
 	return rpc.NewContext()
 }
 
-func counter(c rpc.Context) uint64 {
+func Counter(c rpc.Context) uint64 {
 	var total uint64
 	for _, ver := range c.VC {
 		total += ver
@@ -87,20 +83,17 @@ type IClerkMaker interface {
 type Test struct {
 	*tester.Config
 	t          *testing.T
-	oplog      *OpLog
 	mck        IClerkMaker
 	randomkeys bool
 }
 
 func MakeTest(t *testing.T, cfg *tester.Config, randomkeys bool, mck IClerkMaker) *Test {
-	ts := &Test{
+	return &Test{
 		Config:     cfg,
 		t:          t,
 		mck:        mck,
-		oplog:      &OpLog{},
 		randomkeys: randomkeys,
 	}
-	return ts
 }
 
 func (ts *Test) Cleanup() {
@@ -118,10 +111,9 @@ func (ts *Test) MakeClerk() IKVClerk {
 	return ts.mck.MakeClerk()
 }
 
-// Assumes different ck's put to different keys
 func (ts *Test) PutAtLeastOnce(ck IKVClerk, key, value string, ver rpc.Context, me int) rpc.Context {
 	verPrev := ver
-	for true {
+	for {
 		err := ts.Put(ck, key, value, ver, me)
 		if err == rpc.OK {
 			ver = nextContext(ver, value)
@@ -130,32 +122,31 @@ func (ts *Test) PutAtLeastOnce(ck IKVClerk, key, value string, ver rpc.Context, 
 		if err == rpc.ErrMaybe || err == rpc.ErrVersion {
 			ver = nextContext(ver, value)
 		} else {
-			// if failed with ver = 0, retry
-			if counter(ver) != 0 { // check that ver is indeed 0
-				ts.Fatalf("Put %v ver %d err %v", key, counter(ver), err)
+			if Counter(ver) != 0 {
+				ts.Fatalf("Put %v ver %d err %v", key, Counter(ver), err)
 			}
 		}
 	}
 	desp := fmt.Sprintf("Put(%v, %v) completes", key, value)
-	details := fmt.Sprintf("version: %v -> %v", counter(verPrev), counter(ver))
+	details := fmt.Sprintf("version: %v -> %v", Counter(verPrev), Counter(ver))
 	tester.AnnotateInfo(desp, details)
 	return ver
 }
 
 func (ts *Test) CheckGet(ck IKVClerk, key, value string, version rpc.Context) {
-	tester.AnnotateCheckerBegin(fmt.Sprintf("checking Get(%v) = (%v, %v)", key, value, counter(version)))
+	tester.AnnotateCheckerBegin(fmt.Sprintf("checking Get(%v) = (%v, %v)", key, value, Counter(version)))
 	val, ver, err := ts.Get(ck, key, 0)
 	if err != rpc.OK {
 		text := fmt.Sprintf("Get(%v) returns error = %v", key, err)
 		tester.AnnotateCheckerFailure(text, text)
 		ts.Fatalf(text)
 	}
-	if val != value || counter(ver) != counter(version) {
-		text := fmt.Sprintf("Get(%v) returns (%v, %v) != (%v, %v)", key, val, counter(ver), value, counter(version))
+	if val != value || Counter(ver) != Counter(version) {
+		text := fmt.Sprintf("Get(%v) returns (%v, %v) != (%v, %v)", key, val, Counter(ver), value, Counter(version))
 		tester.AnnotateCheckerFailure(text, text)
 		ts.Fatalf(text)
 	}
-	text := fmt.Sprintf("Get(%v) returns (%v, %v) as expected", key, val, counter(ver))
+	text := fmt.Sprintf("Get(%v) returns (%v, %v) as expected", key, val, Counter(ver))
 	tester.AnnotateCheckerSuccess(text, "OK")
 }
 
@@ -172,15 +163,14 @@ func (ts *Test) CheckPutConcurrent(ck IKVClerk, key string, rs []ClntRes, res *C
 		res.Nmaybe += r.Nmaybe
 	}
 	if reliable {
-		if counter(ver0) != uint64(res.Nok) {
-			ts.Fatalf("Reliable: Wrong number of puts: server %d clnts %v", counter(ver0), res)
+		if Counter(ver0) != uint64(res.Nok) {
+			ts.Fatalf("Reliable: Wrong number of puts: server %d clnts %v", Counter(ver0), res)
 		}
-	} else if counter(ver0) > uint64(res.Nok+res.Nmaybe) {
-		ts.Fatalf("Unreliable: Wrong number of puts: server %d clnts %v", counter(ver0), res)
+	} else if Counter(ver0) > uint64(res.Nok+res.Nmaybe) {
+		ts.Fatalf("Unreliable: Wrong number of puts: server %d clnts %v", Counter(ver0), res)
 	}
 }
 
-// a client runs the function f and then signals it is done
 func (ts *Test) runClient(me int, ca chan ClntRes, done chan struct{}, mkc IClerkMaker, fn Fclnt) {
 	ck := mkc.MakeClerk()
 	v := fn(me, ck, done)
@@ -190,7 +180,6 @@ func (ts *Test) runClient(me int, ca chan ClntRes, done chan struct{}, mkc ICler
 
 type Fclnt func(int, IKVClerk, chan struct{}) ClntRes
 
-// spawn ncli clients
 func (ts *Test) SpawnClientsAndWait(nclnt int, t time.Duration, fn Fclnt) []ClntRes {
 	ca := make([]chan ClntRes, nclnt)
 	done := make(chan struct{})
@@ -210,15 +199,15 @@ func (ts *Test) SpawnClientsAndWait(nclnt int, t time.Duration, fn Fclnt) []Clnt
 }
 
 func (ts *Test) GetJson(ck IKVClerk, key string, me int, v any) rpc.Context {
-	if val, ver, err := Get(ts.Config, ck, key, ts.oplog, me); err == rpc.OK {
+	val, ver, err := Get(ts.Config, ck, key)
+	if err == rpc.OK {
 		if err := json.Unmarshal([]byte(val), v); err != nil {
-			ts.Fatalf("Unmarshal err %v", counter(ver))
+			ts.Fatalf("Unmarshal err %v", Counter(ver))
 		}
 		return ver
-	} else {
-		ts.Fatalf("%d: Get %q err %v", me, key, err)
-		return zeroContext()
 	}
+	ts.Fatalf("%d: Get %q err %v", me, key, err)
+	return ZeroContext()
 }
 
 func (ts *Test) PutJson(ck IKVClerk, key string, v any, ver rpc.Context, me int) rpc.Err {
@@ -226,7 +215,7 @@ func (ts *Test) PutJson(ck IKVClerk, key string, v any, ver rpc.Context, me int)
 	if err != nil {
 		ts.Fatalf("%d: marshal %v", me, err)
 	}
-	return Put(ts.Config, ck, key, string(b), ver, ts.oplog, me)
+	return Put(ts.Config, ck, key, string(b), ver)
 }
 
 func (ts *Test) PutAtLeastOnceJson(ck IKVClerk, key string, value any, ver rpc.Context, me int) rpc.Context {
@@ -236,8 +225,8 @@ func (ts *Test) PutAtLeastOnceJson(ck IKVClerk, key string, value any, ver rpc.C
 	}
 	jsonValue := string(b)
 
-	for true {
-		if err := ts.Put(ck, key, jsonValue, zeroContext(), me); err != rpc.ErrMaybe {
+	for {
+		if err := ts.Put(ck, key, jsonValue, ZeroContext(), me); err != rpc.ErrMaybe {
 			break
 		}
 		ver = nextContext(ver, jsonValue)
@@ -250,18 +239,16 @@ type EntryV struct {
 	V  uint64
 }
 
-// Keep trying until we get one put succeeds while other clients
-// tryint to put to the same key
 func (ts *Test) OnePut(me int, ck IKVClerk, key string, ver rpc.Context) (rpc.Context, bool) {
-	for true {
-		err := ts.PutJson(ck, key, EntryV{me, counter(ver)}, ver, me)
+	for {
+		err := ts.PutJson(ck, key, EntryV{me, Counter(ver)}, ver, me)
 		if !(err == rpc.OK || err == rpc.ErrVersion || err == rpc.ErrMaybe) {
 			ts.Fatalf("Wrong error %v", err)
 		}
 		e := EntryV{}
 		ver0 := ts.GetJson(ck, key, me, &e)
-		if err == rpc.OK && counter(ver0) == counter(ver)+1 { // my put?
-			if e.Id != me && e.V != counter(ver) {
+		if err == rpc.OK && Counter(ver0) == Counter(ver)+1 {
+			if e.Id != me && e.V != Counter(ver) {
 				ts.Fatalf("Wrong value %v", e)
 			}
 		}
@@ -270,14 +257,11 @@ func (ts *Test) OnePut(me int, ck IKVClerk, key string, ver rpc.Context) (rpc.Co
 			return ver, err == rpc.OK
 		}
 	}
-	return zeroContext(), false
 }
 
-// repartition the servers periodically
 func (ts *Test) Partitioner(gid tester.Tgid, ch chan bool) {
-	//log.Printf("partioner %v", gid)
 	defer func() { ch <- true }()
-	for true {
+	for {
 		select {
 		case <-ch:
 			return
@@ -302,15 +286,14 @@ func (ts *Test) Partitioner(gid tester.Tgid, ch chan bool) {
 	}
 }
 
-// One of perhaps many clients doing OnePut's until done signal.
 func (ts *Test) OneClientPut(cli int, ck IKVClerk, ka []string, done chan struct{}) ClntRes {
 	res := ClntRes{}
 	verm := make(map[string]rpc.Context)
 	for _, k := range ka {
-		verm[k] = zeroContext()
+		verm[k] = ZeroContext()
 	}
 	ok := false
-	for true {
+	for {
 		select {
 		case <-done:
 			return res
@@ -327,13 +310,12 @@ func (ts *Test) OneClientPut(cli int, ck IKVClerk, ka []string, done chan struct
 			}
 		}
 	}
-	return res
 }
 
 func MakeKeys(n int) []string {
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
-		keys[i] = "k" + strconv.Itoa(i) // ensure multiple shards
+		keys[i] = "k" + strconv.Itoa(i)
 	}
 	return keys
 }
@@ -343,10 +325,10 @@ func (ts *Test) SpreadPutsSize(ck IKVClerk, n, valsz int) ([]string, []string) {
 	va := make([]string, n)
 	for i := 0; i < n; i++ {
 		va[i] = tester.Randstring(valsz)
-		ck.Put(ka[i], va[i], zeroContext())
+		ck.Put(ka[i], va[i], ZeroContext())
 	}
 	for i := 0; i < n; i++ {
-		ts.CheckGet(ck, ka[i], va[i], ctx(1))
+		ts.CheckGet(ck, ka[i], va[i], Ctx(1))
 	}
 	return ka, va
 }
@@ -360,27 +342,15 @@ type entry struct {
 	N  int
 }
 
-// At each iteration i, oneClient attemps to appends a tuple (me, i)
-// to a key "k" shared with other clients.  The client implements the
-// append by first performing a Clerk.Get and then a Clerk.Put with
-// the version number returned from the Get.  If another client
-// performs an append between the Get and the Put, the clerk may
-// return ErrVersion and the client can retry.  If the clerk returns
-// ErrMaybe, the client's Put may have succeeded or not; in both
-// cases, the client moves to the next iteration.  When running with
-// many clients, the server's value for key "k" has the shape [(i, 1),
-// (i, 2), (j, 1), (j, 3)...]: that is, each client has entries with
-// increasing N, but may some Ns may have been skipped.
 func (ts *Test) OneClientAppend(me int, ck IKVClerk, done chan struct{}) ClntRes {
 	nmay := 0
 	nok := 0
-	for i := 0; true; i++ {
+	for i := 0; ; i++ {
 		select {
 		case <-done:
 			return ClntRes{nok, nmay}
 		default:
-			// keep trying to put my i when err == ErrVersion
-			for true {
+			for {
 				es := []entry{}
 				ver := ts.GetJson(ck, "k", me, &es)
 				es = append(es, entry{me, i})
@@ -388,14 +358,12 @@ func (ts *Test) OneClientAppend(me int, ck IKVClerk, done chan struct{}) ClntRes
 					nok += 1
 					break
 				} else if err == rpc.ErrMaybe {
-					// DPrintf("put %v err %v", ver, err)
 					nmay += 1
 					break
 				}
 			}
 		}
 	}
-	return ClntRes{}
 }
 
 type EntryN struct {
@@ -403,8 +371,6 @@ type EntryN struct {
 	N  int
 }
 
-// check reads the latest value for key "k" and checks that it has the
-// correct tuples.
 func (ts *Test) CheckAppends(es []EntryN, nclnt int, rs []ClntRes, ver rpc.Context) {
 	expect := make(map[int]int)
 	skipped := make(map[int]int)
@@ -413,18 +379,18 @@ func (ts *Test) CheckAppends(es []EntryN, nclnt int, rs []ClntRes, ver rpc.Conte
 		skipped[i] = 0
 	}
 	for _, e := range es {
-		if expect[e.Id] > e.N { // old put?
+		if expect[e.Id] > e.N {
 			ts.Fatalf("%d: wrong expecting %v but got %v", e.Id, expect[e.Id], e.N)
 		} else if expect[e.Id] == e.N {
 			expect[e.Id] += 1
-		} else { // missing entries because of failed put
+		} else {
 			s := (e.N - expect[e.Id])
 			expect[e.Id] = e.N + 1
 			skipped[e.Id] += s
 		}
 	}
-	if len(es)+1 != int(counter(ver)) {
-		ts.Fatalf("%d appends in val != puts on server %d", len(es), counter(ver))
+	if len(es)+1 != int(Counter(ver)) {
+		ts.Fatalf("%d appends in val != puts on server %d", len(es), Counter(ver))
 	}
 	for c, n := range expect {
 		if skipped[c] > rs[c].Nmaybe {
@@ -434,4 +400,24 @@ func (ts *Test) CheckAppends(es []EntryN, nclnt int, rs []ClntRes, ver rpc.Conte
 			ts.Fatalf("%d: %d puts on server > ok+maybe %d", c, n, rs[c].Nok+rs[c].Nmaybe)
 		}
 	}
+}
+
+func Get(cfg *tester.Config, ck IKVClerk, key string) (string, rpc.Context, rpc.Err) {
+	cfg.OpInc()
+	return ck.Get(key)
+}
+
+func Put(cfg *tester.Config, ck IKVClerk, key string, value string, context rpc.Context) rpc.Err {
+	cfg.OpInc()
+	return ck.Put(key, value, context)
+}
+
+func (ts *Test) Get(ck IKVClerk, key string, _ int) (string, rpc.Context, rpc.Err) {
+	ts.OpInc()
+	return ck.Get(key)
+}
+
+func (ts *Test) Put(ck IKVClerk, key string, value string, context rpc.Context, _ int) rpc.Err {
+	ts.OpInc()
+	return ck.Put(key, value, context)
 }

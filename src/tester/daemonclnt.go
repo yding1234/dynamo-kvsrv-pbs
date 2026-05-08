@@ -10,8 +10,8 @@ import (
 	"sync"
 
 	"dynamo-kvsrv/labrpc"
-	"dynamo-kvsrv/tester1/demux"
-	"dynamo-kvsrv/tester1/sockrpc"
+	"dynamo-kvsrv/tester/demux"
+	"dynamo-kvsrv/tester/sockrpc"
 )
 
 //

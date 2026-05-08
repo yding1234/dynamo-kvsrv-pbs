@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"dynamo-kvsrv/labrpc"
-	"dynamo-kvsrv/tester1/demux"
+	"dynamo-kvsrv/tester/demux"
 )
 
 type RPCArgs struct {

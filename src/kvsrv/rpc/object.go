@@ -1,7 +1,7 @@
 package rpc
 
 import (
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/vclock"
 )
 
 type Object struct {

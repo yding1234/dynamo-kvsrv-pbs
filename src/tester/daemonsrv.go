@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"dynamo-kvsrv/labrpc"
-	"dynamo-kvsrv/tester1/sockrpc"
+	"dynamo-kvsrv/tester/sockrpc"
 )
 
 //

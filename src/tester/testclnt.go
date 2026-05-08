@@ -1,7 +1,7 @@
 package tester
 
 import (
-	"dynamo-kvsrv/tester1/sockrpc"
+	"dynamo-kvsrv/tester/sockrpc"
 )
 
 type TesterClnt struct {

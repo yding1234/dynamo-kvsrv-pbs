@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"dynamo-kvsrv/chr"
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/rpc"
 	"dynamo-kvsrv/kvsrv_eval"
 	"dynamo-kvsrv/labrpc"
-	"dynamo-kvsrv/tester1"
+	"dynamo-kvsrv/tester"
 )
 
 const Debug = false

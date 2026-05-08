@@ -15,11 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"dynamo-kvsrv/chr"
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/rpc"
 	"dynamo-kvsrv/kvsrv_eval"
 	"dynamo-kvsrv/labrpc"
-	tester "dynamo-kvsrv/tester1"
+	tester "dynamo-kvsrv/tester"
 )
 
 const pbsDemoNumSectors = 512

@@ -5,10 +5,10 @@ package kvsrv
 import (
 	"testing"
 
-	"dynamo-kvsrv/chr"
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/rpc"
 	"dynamo-kvsrv/labrpc"
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/vclock"
 )
 
 func makeTestObject(value string, timestamp uint64, etag string, versions map[string]uint64) rpc.Object {

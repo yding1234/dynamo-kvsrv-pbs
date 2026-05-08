@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"dynamo-kvsrv/chr"
-	"dynamo-kvsrv/kvsrv1/rpc"
-	"dynamo-kvsrv/kvtest1"
-	"dynamo-kvsrv/tester1"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/rpc"
+	"dynamo-kvsrv/kvsrv/internal/testkv"
+	"dynamo-kvsrv/tester"
 )
 
 // A successful coordinator read should asynchronously repair a replica whose
@@ -19,7 +19,7 @@ func TestReadRepairRepairsStaleReplica(t *testing.T) {
 	ts.Begin("Read repair repairs stale replica")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-read-repair"
 	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
@@ -76,7 +76,7 @@ func TestReadRepairRepairsErrNoKeyReplica(t *testing.T) {
 	ts.Begin("Read repair repairs ErrNoKey replica")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-read-repair-nokey"
 	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
@@ -113,7 +113,7 @@ func TestReadRepairEventuallyRepairsStaleReplicaUnreliable(t *testing.T) {
 	ts.Begin("Read repair eventually repairs stale replica under unreliable network")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-read-repair-unreliable"
 
@@ -233,7 +233,7 @@ func TestReadRepairEventuallyRepairsStaleReplicaUnreliable(t *testing.T) {
 	t.Fatalf("read repair did not converge under unreliable network; final err=%v objects=%d", final.Err, len(final.Objects))
 }
 
-func collectCanonicalReplicaSiblings(t *testing.T, tck *kvtest.TestClerk, key string, prefList []string) []rpc.Object {
+func collectCanonicalReplicaSiblings(t *testing.T, tck *testkv.TestClerk, key string, prefList []string) []rpc.Object {
 	t.Helper()
 
 	canonicalObjects := make([]rpc.Object, 0)
@@ -249,7 +249,7 @@ func collectCanonicalReplicaSiblings(t *testing.T, tck *kvtest.TestClerk, key st
 	return canonicalObjects
 }
 
-func triggerReadRepairAndWait(t *testing.T, tck *kvtest.TestClerk, key, target string, repaired func(rpc.GetReply) bool) {
+func triggerReadRepairAndWait(t *testing.T, tck *testkv.TestClerk, key, target string, repaired func(rpc.GetReply) bool) {
 	t.Helper()
 
 	deadline := time.Now().Add(2 * time.Second)

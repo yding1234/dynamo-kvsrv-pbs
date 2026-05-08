@@ -1,11 +1,11 @@
 package kvsrv
 
 import (
-	"dynamo-kvsrv/chr"
-	"dynamo-kvsrv/kvtest1"
-	"dynamo-kvsrv/kvsrv1/rpc"
-	"dynamo-kvsrv/tester1"
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/internal/testkv"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/rpc"
+	"dynamo-kvsrv/kvsrv/vclock"
+	"dynamo-kvsrv/tester"
 )
 
 type Clerk struct {
@@ -13,7 +13,7 @@ type Clerk struct {
 	ring *chr.ConsistentHashRing
 }
 
-func MakeClerk(clnt *tester.Clnt, ring *chr.ConsistentHashRing) kvtest.IKVClerk {
+func MakeClerk(clnt *tester.Clnt, ring *chr.ConsistentHashRing) testkv.IKVClerk {
 	ck := &Clerk{clnt: clnt,
 		ring: ring,
 	}

@@ -1,9 +1,11 @@
-package models
+package tester
 
-import "github.com/anishathalye/porcupine"
+import (
+	"fmt"
+	"sort"
 
-import "fmt"
-import "sort"
+	"github.com/anishathalye/porcupine"
+)
 
 type KvInput struct {
 	Op      uint8 // 0 => get, 1 => put
@@ -23,6 +25,7 @@ type KvState struct {
 	Version uint64
 }
 
+// KvModel is used only for annotation/visualization placeholders with Porcupine.
 var KvModel = porcupine.Model{
 	Partition: func(history []porcupine.Operation) [][]porcupine.Operation {
 		m := make(map[string][]porcupine.Operation)
@@ -42,8 +45,6 @@ var KvModel = porcupine.Model{
 		return ret
 	},
 	Init: func() interface{} {
-		// note: we are modeling a single key's value here;
-		// we're partitioning by key, so this is okay
 		return KvState{"", 0}
 	},
 	Step: func(state, input, output interface{}) (bool, interface{}) {
@@ -52,15 +53,12 @@ var KvModel = porcupine.Model{
 		st := state.(KvState)
 		switch inp.Op {
 		case 0:
-			// get
 			return out.Value == st.Value, state
 		case 1:
-			// put
 			if st.Version == inp.Version {
 				return out.Err == "OK" || out.Err == "ErrMaybe", KvState{inp.Value, st.Version + 1}
-			} else {
-				return out.Err == "ErrVersion" || out.Err == "ErrMaybe", st
 			}
+			return out.Err == "ErrVersion" || out.Err == "ErrMaybe", st
 		default:
 			return false, "<invalid>"
 		}

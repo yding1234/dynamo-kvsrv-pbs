@@ -4,7 +4,7 @@
 package tester
 
 import (
-	"dynamo-kvsrv/tester1/sockrpc"
+	"dynamo-kvsrv/tester/sockrpc"
 )
 
 /// Global variable initialized in `daemonsrv.go`.

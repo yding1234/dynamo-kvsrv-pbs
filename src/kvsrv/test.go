@@ -7,13 +7,13 @@ import (
 	// "log"
 	"testing"
 
-	"dynamo-kvsrv/kvtest1"
-	"dynamo-kvsrv/tester1"
-	"dynamo-kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/internal/testkv"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/tester"
 )
 
 type TestKV struct {
-	*kvtest.Test
+	*testkv.Test
 	t        *testing.T
 	reliable bool
 }
@@ -32,11 +32,11 @@ func MakeTestKV(t *testing.T, reliable bool) *TestKV {
 		t:        t,
 		reliable: reliable,
 	}
-	ts.Test = kvtest.MakeTest(t, cfg, false, ts)
+	ts.Test = testkv.MakeTest(t, cfg, false, ts)
 	return ts
 }
 
-func (ts *TestKV) MakeClerk() kvtest.IKVClerk {
+func (ts *TestKV) MakeClerk() testkv.IKVClerk {
 	clnt := ts.Config.MakeClient()
 	// ck := MakeClerk(clnt, tester.ServerName(tester.GRP0, 0))
 
@@ -46,11 +46,11 @@ func (ts *TestKV) MakeClerk() kvtest.IKVClerk {
 	}
 	ring := chr.MakeConsistentHashRing(numReplicas, numSectors, numServers, nodeIDs)
 	ck := MakeClerk(clnt, ring)
-	return &kvtest.TestClerk{ck, clnt, ts.Test.Config}
+	return &testkv.TestClerk{IKVClerk: ck, Clnt: clnt, Cfg: ts.Test.Config}
 }
 
-func (ts *TestKV) DeleteClerk(ck kvtest.IKVClerk) {
-	tck := ck.(*kvtest.TestClerk)
+func (ts *TestKV) DeleteClerk(ck testkv.IKVClerk) {
+	tck := ck.(*testkv.TestClerk)
 	ts.DeleteClient(tck.Clnt)
 }
 

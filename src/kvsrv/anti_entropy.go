@@ -1,7 +1,7 @@
 package kvsrv
 
 import (
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/rpc"
 	"math/rand"
 	"time"
 )

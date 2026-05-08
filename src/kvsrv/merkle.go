@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/rpc"
 )
 
 // writing to hash follows these two rules:

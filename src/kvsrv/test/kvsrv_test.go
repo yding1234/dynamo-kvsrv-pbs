@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
-	"dynamo-kvsrv/kvtest1"
-	"dynamo-kvsrv/tester1"
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/rpc"
+	"dynamo-kvsrv/kvsrv/internal/testkv"
+	"dynamo-kvsrv/tester"
+	"dynamo-kvsrv/kvsrv/vclock"
 )
 
 const testContextNode = "__test__"
@@ -87,7 +87,7 @@ func TestPutConcurrentReliable(t *testing.T) {
 	ts.Begin("Test: concurrent writes produce siblings")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-siblings"
 	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
@@ -193,7 +193,7 @@ func TestConflictSiblingsAndConverge(t *testing.T) {
 	ts.Begin("Conflict siblings and converge")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-conflict"
 	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
@@ -265,7 +265,7 @@ func TestRepeatedReadsDoNotDuplicateSiblings(t *testing.T) {
 	ts.Begin("Repeated reads keep sibling count stable")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-stable-siblings"
 	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
@@ -306,7 +306,7 @@ func TestDominatingWriteRemovesOldSiblings(t *testing.T) {
 	ts.Begin("Dominating write removes old siblings")
 
 	ck := ts.MakeClerk()
-	tck := ck.(*kvtest.TestClerk)
+	tck := ck.(*testkv.TestClerk)
 
 	const key = "k-dominates"
 	if err := ck.Put(key, "base", zeroContext()); err != rpc.OK {
@@ -372,7 +372,7 @@ func mergeSiblingContexts(objects []rpc.Object, mergedValue string) rpc.Context 
 	return merged
 }
 
-func rawCoordGet(t *testing.T, tck *kvtest.TestClerk, key string) rpc.GetReply {
+func rawCoordGet(t *testing.T, tck *testkv.TestClerk, key string) rpc.GetReply {
 	t.Helper()
 
 	args := rpc.GetArgs{Key: key}
@@ -388,7 +388,7 @@ func rawCoordGet(t *testing.T, tck *kvtest.TestClerk, key string) rpc.GetReply {
 	return reply
 }
 
-func rawReplicaGet(t *testing.T, tck *kvtest.TestClerk, server, key string) rpc.GetReply {
+func rawReplicaGet(t *testing.T, tck *testkv.TestClerk, server, key string) rpc.GetReply {
 	t.Helper()
 
 	args := rpc.GetArgs{Key: key}

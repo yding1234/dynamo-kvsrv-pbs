@@ -4,7 +4,7 @@ import (
 	"math/rand"
 	"time"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/rpc"
 )
 
 func (kv *KVServer) StartSyncMembers() {

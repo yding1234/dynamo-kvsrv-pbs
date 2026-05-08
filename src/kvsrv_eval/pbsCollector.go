@@ -8,7 +8,7 @@ import (
 	"slices"
 	"sort"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/rpc"
 )
 
 // MessageTrace records one coordinator<->replica exchange

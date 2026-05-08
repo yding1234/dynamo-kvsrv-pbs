@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
-	"dynamo-kvsrv/vclock"
+	"dynamo-kvsrv/kvsrv/vclock"
 )
 
 type Context struct {

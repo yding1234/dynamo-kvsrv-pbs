@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"dynamo-kvsrv/chr"
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/chr"
+	"dynamo-kvsrv/kvsrv/rpc"
 	"dynamo-kvsrv/labrpc"
 )
 

@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv/rpc"
 )
 
 func (kv *KVServer) HintedPut(args *rpc.HintedPutArgs, reply *rpc.HintedPutReply) {

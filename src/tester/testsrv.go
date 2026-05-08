@@ -3,7 +3,7 @@ package tester
 import (
 	//"log"
 
-	"dynamo-kvsrv/tester1/sockrpc"
+	"dynamo-kvsrv/tester/sockrpc"
 )
 
 type TesterRPC struct {

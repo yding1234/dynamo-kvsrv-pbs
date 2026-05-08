@@ -9,7 +9,6 @@ import (
 	"strings"
 	"slices"
 	"github.com/anishathalye/porcupine"
-	"dynamo-kvsrv/models1"
 )
 
 ///
@@ -547,10 +546,10 @@ func (an *Annotation) cleanup(failed bool, end string) {
 	}
 
 	// Create a fresh linearization info without any client operations and use
-	// models.KvModel simply as a placeholder.
+	// KvModel simply as a placeholder for Porcupine visualization output.
 	info := porcupine.LinearizationInfo{}
 	info.AddAnnotations(annotations)
-	porcupine.Visualize(models.KvModel, info, file)
+	porcupine.Visualize(KvModel, info, file)
 	fmt.Printf("info: wrote visualization to %s\n", file.Name())
 }
 

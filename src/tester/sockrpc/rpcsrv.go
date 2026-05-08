@@ -5,7 +5,7 @@ import (
 	"net"
 
 	"dynamo-kvsrv/labrpc"
-	"dynamo-kvsrv/tester1/demux"
+	"dynamo-kvsrv/tester/demux"
 )
 
 func SockName(endName string) string {
