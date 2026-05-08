@@ -1,6 +1,0 @@
-name,label,kind,read_repair,anti_entropy,hinted_handoff,failure_mode,notes
-predict_baseline,predict_baseline,predict,false,false,false,none,"PBS baseline predictor without read repair, anti-entropy, or hinted handoff."
-observe_baseline,observe_baseline,observe,false,false,false,single_dead_replica,Observed PBS curve from the corresponding demo scenario.
-observe_read_repair,observe_read_repair,observe,true,false,false,single_dead_replica,Observed PBS curve from the corresponding demo scenario.
-observe_anti_entropy,observe_anti_entropy,observe,false,true,false,single_dead_replica,Observed PBS curve from the corresponding demo scenario.
-observe_hinted_handoff,observe_hinted_handoff,observe,false,false,true,single_dead_replica,Observed PBS curve from the corresponding demo scenario.

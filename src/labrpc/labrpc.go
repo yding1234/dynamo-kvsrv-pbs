@@ -49,7 +49,7 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.5840/labgob"
+import "dynamo-kvsrv/labgob"
 import "bytes"
 import "reflect"
 import "sync"
@@ -60,24 +60,51 @@ import "math/rand"
 import "time"
 import "sync/atomic"
 
+// uniformShortDelayNs, when positive, replaces the legacy SHORTDELAY (ms modulo):
+// each RPC sleeps Uniform(0, max) nanoseconds before dispatch. Zero restores legacy behaviour.
+var uniformShortDelayNs atomic.Int64
+
+// SetUniformShortDelayMax sets per-RPC uniform short delay bounds [0,d). Non-positive clears override.
+func SetUniformShortDelayMax(d time.Duration) {
+	if d <= 0 {
+		uniformShortDelayNs.Store(0)
+		return
+	}
+	uniformShortDelayNs.Store(d.Nanoseconds())
+}
+
+func sleepShortDispatchDelay() {
+	if maxNs := uniformShortDelayNs.Load(); maxNs > 0 {
+		if maxNs == 1 {
+			time.Sleep(time.Nanosecond)
+			return
+		}
+		off := rand.Int63n(maxNs)
+		time.Sleep(time.Duration(off))
+		return
+	}
+	ms := rand.Int() % SHORTDELAY
+	time.Sleep(time.Duration(ms) * time.Millisecond)
+}
+
 const (
 	SHORTDELAY        = 5    // ms
 	LONGDELAY         = 3000 // ms
 	MAXDELAY          = LONGDELAY + 100
 	LONGTAILBASEDELAY = 25 // ms
 	LONGTAILMINDELAY  = 50 // ms
-	LONGTAILSHAPE     = 1.5 // Pareto alpha; smaller means a heavier tail.
-	// UnreliableDropPermille: when Network.Reliable(false) ("unreliable" mode),
-	// each RPC request and each reply is dropped independently with
-	// UnreliableDropPermille/1000 probability. 30 -> 3%. When Reliable(true),
-	// there is no random drop and no short delay in processReq.
-	UnreliableDropPermille = 30
-	// LongReorderPermille: when LongReordering(true), each reply is Pareto-delayed
-	// (long tail) with this probability in permille. Independent of Reliable:
-	// both reliable and unreliable networks can use long reordering; drops only
-	// apply when Reliable(false).
+	LONGTAILSHAPE     = 10 // Pareto alpha
 	LongReorderPermille = 10
 )
+
+// UnreliableDropPermille: when Network.Reliable(false) ("unreliable" mode),
+// each RPC request and each reply is dropped independently with
+// UnreliableDropPermille/1000 probability. 30 -> 3%. When Reliable(true),
+// requests and replies are not randomly dropped by that mechanism (but the
+// optional SetUniformShortDelayMax / legacy short delay always runs before dispatch).
+//
+// Mutable so tools can sweep rates; default matches the historical const (3%).
+var UnreliableDropPermille = 10
 
 func longTailDelayMs(minMs int) int {
 	if minMs >= LONGDELAY {
@@ -324,9 +351,8 @@ func (rn *Network) processReq(req reqMsg) {
 	//log.Printf("processReq %v %v name %v %v", req.endname, enabled, servername, server)
 
 	if enabled && servername != nil && server != nil {
-		// short delay
-		ms := (rand.Int() % SHORTDELAY)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// short delay (uniform [0,max) ns when SetUniformShortDelayMax is used)
+		sleepShortDispatchDelay()
 
 		// Unreliable: 3% request drop. Reliable: no drop.
 		if reliable == false && (rand.Int()%1000) < UnreliableDropPermille {

@@ -1,4 +1,4 @@
-module 6.5840
+module dynamo-kvsrv
 
 go 1.24.0
 

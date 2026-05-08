@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"6.5840/kvsrv1/rpc"
-	"6.5840/tester1"
-	"6.5840/vclock"
+	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/tester1"
+	"dynamo-kvsrv/vclock"
 )
 
 // The tester generously allows solutions to complete elections in one second

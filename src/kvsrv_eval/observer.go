@@ -3,8 +3,8 @@ package kvsrv_eval
 import (
 	"time"
 
-	"6.5840/kvsrv1/rpc"
-	"6.5840/vclock"
+	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/vclock"
 )
 
 func ObserveDeltaP(reads []CompletedRead, writes []CompletedWrite, delta time.Duration) float64 {
@@ -47,13 +47,7 @@ func ObserveDeltaPSweep(collector *PBSCollector, deltas []time.Duration) []float
 	return results
 }
 
-// ObserveDeltaPSweepE2E returns end-to-end non-stale probability:
-//
-//	(# reads in the collector that are delta-regular) / all_read_attempts
-//
-// The collector records successful CoordGet completions; all_read_attempts must
-// count every read RPC (e.g. reader gets + writer refresh gets), not just reader outcome sums.
-// When allReadAttempts <= 0, it falls back to the successful-read denominator.
+
 func ObserveDeltaPSweepE2E(collector *PBSCollector, deltas []time.Duration, allReadAttempts int64) []float64 {
 	if allReadAttempts <= 0 {
 		return ObserveDeltaPSweep(collector, deltas)
@@ -86,7 +80,7 @@ func ObserveKPSweep(collector *PBSCollector, ks []int) []float64 {
 	return results
 }
 
-// ObserveKPSweepE2E returns end-to-end non-stale probability:
+
 // non_stale_reads / all_read_attempts.
 // When allReadAttempts <= 0, it falls back to the successful-read denominator.
 func ObserveKPSweepE2E(collector *PBSCollector, ks []int, allReadAttempts int64) []float64 {

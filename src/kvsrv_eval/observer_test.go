@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"6.5840/kvsrv1/rpc"
-	"6.5840/vclock"
+	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/vclock"
 )
 
 func makeObservedObject(value string, timestamp uint64, versions map[string]uint64) rpc.Object {

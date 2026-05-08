@@ -14,19 +14,14 @@ type SimulationConfig struct {
 	ReadQuorum  int
 	WriteQuorum int
 	Delta       time.Duration
-	DeltaPoints int // number of sample points along the delta axis // TODO: remove this if we dont need it
+	DeltaPoints int // number of sample points along the delta axis
 	K           int
 	Iterations  int        // number of trials to run
 	RNG         *rand.Rand // random number generator
 
-	// Plot rendering knobs (orthogonal to the WARS simulator itself).
-	// YMin sets the main delta_p.png and k_p.png y-axis lower bound; <=0
-	// means auto. YMax is ignored: probability plots always use y=1.0 on top.
 	YMin float64
 	YMax float64
-	// EmitZoomPlot, when true, additionally writes delta_p_zoom.png and
-	// k_p_zoom.png: y is still 0..1, but the lower bound is auto-fit to
-	// observed data to stretch the high-P region.
+
 	EmitZoomPlot bool
 }
 
@@ -78,8 +73,6 @@ func SimulateDeltaP(config SimulationConfig, samplers WARSSamplers) SimulationRe
 }
 
 // algorithm 1 in the PBS paper
-// simulate a single trial of the WARS Monte Carlo simulation
-// and returns true if the read is consistent with the write after delta time
 func simulateTrial(config SimulationConfig, samplers WARSSamplers) bool {
 	writeRequests := make([]time.Duration, config.NumReplicas)
 	writeLatencies := make([]time.Duration, config.NumReplicas)

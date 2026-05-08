@@ -16,19 +16,9 @@ import (
 	"gonum.org/v1/plot/vg/draw"
 )
 
-// PBSThreshold99_99 is the probability level we annotate on zoom plots so
-// readers can see at-a-glance which Δ (or K) each consistency mechanism
-// requires to reach 99.99% staleness probability.
-const PBSThreshold99_99 = 0.9999
-
-// probabilityYMax is the fixed upper bound for all P(staleness) y-axes; values
-// are in [0,1] and we do not autoscale the top of the panel below 1.0.
+const PBSThreshold99_9 = 0.999
 const probabilityYMax = 1.0
 
-// ensureProbabilityYSpan fixes gonum's axis sanitizer: when Y.Min==Y.Max it does
-// Min--/Max++ on floats, turning (1,1) into (0,2) and rescaling the panel to
-// 0..2. We keep a strict upper bound of 1.0 but nudge Min slightly below Max
-// when the data floor sits at the ceiling.
 func ensureProbabilityYSpan(yMin float64) (min, max float64) {
 	max = probabilityYMax
 	min = yMin
@@ -71,9 +61,6 @@ type SeriesConfig struct {
 type CollectorSeries struct {
 	Config    SeriesConfig
 	Collector *PBSCollector
-	// ReadAttempts is the denominator for E2E: every read RPC in the workload
-	// (not only the reader’s outcome buckets). When <=0, E2E falls back to
-	// a successful-read-only fraction.
 	ReadAttempts int64
 }
 
@@ -171,10 +158,6 @@ func PlotComparisonToDir(
 		configRows = append(configRows, cfg)
 	}
 
-	// y-axis bounds for the main plots.
-	// <=0 means "auto-fit to predicted + observed" (delta) / observed-only (k).
-	// We keep the original behavior: delta_p.png used to ignore predicted in
-	// auto-fit so the observed cluster wasn't squashed; we preserve that.
 	mainDeltaYMin, mainDeltaYMax := resolveYRange(config.YMin, config.YMax,
 		minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPs))
 	mainKPYMin, mainKPYMax := resolveYRange(config.YMin, config.YMax,
@@ -203,7 +186,7 @@ func PlotComparisonToDir(
 	if e2eDeltaYMin < 0 {
 		e2eDeltaYMin = 0
 	}
-	if err := saveDeltaPlot(deltaPE2EPlot, deltas, NamedProbabilitySeries{}, observedDeltaPE2E, e2eDeltaYMin, probabilityYMax, PBSThreshold99_99); err != nil {
+	if err := saveDeltaPlot(deltaPE2EPlot, deltas, NamedProbabilitySeries{}, observedDeltaPE2E, e2eDeltaYMin, probabilityYMax, PBSThreshold99_9); err != nil {
 		return PlotOutput{}, err
 	}
 	kpE2EPlot := filepath.Join(outputDir, "k_p_e2e.png")
@@ -211,7 +194,7 @@ func PlotComparisonToDir(
 	if e2eKPYMin < 0 {
 		e2eKPYMin = 0
 	}
-	if err := saveKPPlot(kpE2EPlot, ks, NamedProbabilitySeries{}, observedKPE2E, e2eKPYMin, probabilityYMax, PBSThreshold99_99); err != nil {
+	if err := saveKPPlot(kpE2EPlot, ks, NamedProbabilitySeries{}, observedKPE2E, e2eKPYMin, probabilityYMax, PBSThreshold99_9); err != nil {
 		return PlotOutput{}, err
 	}
 	deltaPE2ECSV := filepath.Join(outputDir, "delta_p_e2e.csv")
@@ -240,9 +223,6 @@ func PlotComparisonToDir(
 		SeriesConfigCSVPath: configCSV,
 	}
 
-	// Optional zoom plots: y-axis fit to observed series only so that the
-	// near-1.0 differences between baseline / read_repair / anti_entropy /
-	// hinted_handoff are visually distinguishable.
 	if config.EmitZoomPlot {
 		// y-axis: start at the minimum y across all observed points.
 		zoomDeltaYMin := minObservedYMin(observedDeltaPs)
@@ -254,17 +234,12 @@ func PlotComparisonToDir(
 			zoomKPYMin = 0
 		}
 
-		// Pass an empty predicted series so the zoom plot only shows observed
-		// curves; otherwise the predicted line would be partially clipped at
-		// the bottom of the zoomed y-range and add visual noise.
-		// Pass threshold so each observed series gets a "first crosses 99.99%"
-		// annotation (vertical drop-line + label) for at-a-glance comparison.
 		deltaZoom := filepath.Join(outputDir, "delta_p_zoom.png")
-		if err := saveDeltaPlot(deltaZoom, deltas, NamedProbabilitySeries{}, observedDeltaPs, zoomDeltaYMin, probabilityYMax, PBSThreshold99_99); err != nil {
+		if err := saveDeltaPlot(deltaZoom, deltas, NamedProbabilitySeries{}, observedDeltaPs, zoomDeltaYMin, probabilityYMax, PBSThreshold99_9); err != nil {
 			return PlotOutput{}, err
 		}
 		kpZoom := filepath.Join(outputDir, "k_p_zoom.png")
-		if err := saveKPPlot(kpZoom, ks, NamedProbabilitySeries{}, observedKPs, zoomKPYMin, probabilityYMax, PBSThreshold99_99); err != nil {
+		if err := saveKPPlot(kpZoom, ks, NamedProbabilitySeries{}, observedKPs, zoomKPYMin, probabilityYMax, PBSThreshold99_9); err != nil {
 			return PlotOutput{}, err
 		}
 		out.DeltaPZoomPath = deltaZoom
@@ -364,9 +339,7 @@ func saveDeltaPlot(path string, deltas []time.Duration, predicted NamedProbabili
 		p.Legend.Add(series.Label, observedLine)
 	}
 
-	// Threshold annotation: horizontal dashed line at y=threshold plus a
-	// vertical drop-line + text label at the first delta where each observed
-	// series crosses the threshold.
+
 	if threshold > 0 && yMin < threshold && threshold <= probabilityYMax {
 		xMin := durationToMilliseconds(deltas[0])
 		xMax := durationToMilliseconds(deltas[len(deltas)-1])
@@ -423,9 +396,6 @@ func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observe
 		p.Legend.Add(series.Label, observedLine)
 	}
 
-	// Threshold annotation; same idea as saveDeltaPlot but K is discrete
-	// so we report the smallest *integer* K at which the series crosses
-	// the threshold (no interpolation makes sense for K-regularity).
 	if threshold > 0 && yMin < threshold && threshold <= probabilityYMax {
 		xMin := float64(ks[0])
 		xMax := float64(ks[len(ks)-1])
@@ -447,9 +417,7 @@ func saveKPPlot(path string, ks []int, predicted NamedProbabilitySeries, observe
 	return p.Save(7*vg.Inch, 4.5*vg.Inch, path)
 }
 
-// firstCrossingK returns the smallest integer K at which the curve first
-// reaches or exceeds threshold. K-regularity is defined over discrete K, so
-// no interpolation is performed. Returns (0, false) when no swept K crosses.
+
 func firstCrossingK(ks []int, ys []float64, threshold float64) (int, bool) {
 	if len(ks) == 0 || len(ks) != len(ys) {
 		return 0, false
@@ -462,11 +430,7 @@ func firstCrossingK(ks []int, ys []float64, threshold float64) (int, bool) {
 	return 0, false
 }
 
-// firstCrossingX returns the smallest x where the (xs, ys) curve first reaches
-// or exceeds threshold. Linear interpolation is used between the two adjacent
-// points that bracket the crossing. Returns (0, false) if the curve never
-// crosses (e.g. the observed series tops out below threshold within the swept
-// range).
+
 func firstCrossingX(xs []float64, ys []float64, threshold float64) (float64, bool) {
 	if len(xs) == 0 || len(xs) != len(ys) {
 		return 0, false
@@ -502,9 +466,7 @@ func addThresholdLine(p *plot.Plot, xMin, xMax, threshold float64) error {
 	return nil
 }
 
-// addCrossingMarker draws a short vertical line from yMin to threshold at x,
-// plus a text label placed near the top. The label color matches the i-th
-// observed series so it lines up visually with the curve.
+
 func addCrossingMarker(p *plot.Plot, x, threshold, yMin float64, label string, seriesIdx int) error {
 	col := observedPalette[seriesIdx%len(observedPalette)]
 
@@ -517,9 +479,7 @@ func addCrossingMarker(p *plot.Plot, x, threshold, yMin float64, label string, s
 	drop.Dashes = []vg.Length{vg.Points(3), vg.Points(2)}
 	p.Add(drop)
 
-	// Stagger labels along Y so they don't overlap when several series cross
-	// at nearly the same x. seriesIdx 0 sits highest, subsequent ones step
-	// down by ~6% of the (threshold - yMin) span.
+
 	span := threshold - yMin
 	if span <= 0 {
 		span = math.Max(threshold*0.001, 1e-6)
@@ -731,4 +691,133 @@ func kSweep(maxK int) []int {
 		ks[i-1] = i
 	}
 	return ks
+}
+
+
+func PlotObserveOnlyComparisonToDir(config SimulationConfig, observedSeries []CollectorSeries, outputDir string) (PlotOutput, error) {
+	deltas := deltaSweep(config.Delta, config.DeltaPoints)
+	ks := kSweep(config.K)
+
+	observedDeltaPs := make([]NamedProbabilitySeries, 0, len(observedSeries))
+	observedKPs := make([]NamedProbabilitySeries, 0, len(observedSeries))
+	observedDeltaPE2E := make([]NamedProbabilitySeries, 0, len(observedSeries))
+	observedKPE2E := make([]NamedProbabilitySeries, 0, len(observedSeries))
+	configRows := make([]SeriesConfig, 0, len(observedSeries))
+
+	for _, observed := range observedSeries {
+		cfg := observed.Config
+		observedDeltaPs = append(observedDeltaPs, NamedProbabilitySeries{
+			Name:   cfg.Name,
+			Label:  cfg.Label,
+			Values: ObserveDeltaPSweep(observed.Collector, deltas),
+		})
+		observedKPs = append(observedKPs, NamedProbabilitySeries{
+			Name:   cfg.Name,
+			Label:  cfg.Label,
+			Values: ObserveKPSweep(observed.Collector, ks),
+		})
+		observedDeltaPE2E = append(observedDeltaPE2E, NamedProbabilitySeries{
+			Name:   cfg.Name,
+			Label:  cfg.Label,
+			Values: ObserveDeltaPSweepE2E(observed.Collector, deltas, observed.ReadAttempts),
+		})
+		observedKPE2E = append(observedKPE2E, NamedProbabilitySeries{
+			Name:   cfg.Name,
+			Label:  cfg.Label,
+			Values: ObserveKPSweepE2E(observed.Collector, ks, observed.ReadAttempts),
+		})
+		configRows = append(configRows, cfg)
+	}
+
+	predictedDelta := NamedProbabilitySeries{}
+	predictedK := NamedProbabilitySeries{}
+
+	mainDeltaYMin, mainDeltaYMax := resolveYRange(config.YMin, config.YMax,
+		minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPs))
+	mainKPYMin, mainKPYMax := resolveYRange(config.YMin, config.YMax,
+		minSeriesLeft(predictedK, observedKPs))
+
+	deltaPlot := filepath.Join(outputDir, "delta_p.png")
+	if err := saveDeltaPlot(deltaPlot, deltas, predictedDelta, observedDeltaPs, mainDeltaYMin, mainDeltaYMax, 0); err != nil {
+		return PlotOutput{}, err
+	}
+	deltaCSV := filepath.Join(outputDir, "delta_p.csv")
+	if err := saveDeltaObservedCSV(deltaCSV, deltas, observedDeltaPs); err != nil {
+		return PlotOutput{}, err
+	}
+
+	kpPlot := filepath.Join(outputDir, "k_p.png")
+	if err := saveKPPlot(kpPlot, ks, predictedK, observedKPs, mainKPYMin, mainKPYMax, 0); err != nil {
+		return PlotOutput{}, err
+	}
+	kpCSV := filepath.Join(outputDir, "k_p.csv")
+	if err := saveKPObservedCSV(kpCSV, ks, observedKPs); err != nil {
+		return PlotOutput{}, err
+	}
+
+	deltaPE2EPlot := filepath.Join(outputDir, "delta_p_e2e.png")
+	e2eDeltaYMin := minSeriesLeft(NamedProbabilitySeries{}, observedDeltaPE2E)
+	if e2eDeltaYMin < 0 {
+		e2eDeltaYMin = 0
+	}
+	if err := saveDeltaPlot(deltaPE2EPlot, deltas, NamedProbabilitySeries{}, observedDeltaPE2E, e2eDeltaYMin, probabilityYMax, PBSThreshold99_9); err != nil {
+		return PlotOutput{}, err
+	}
+	kpE2EPlot := filepath.Join(outputDir, "k_p_e2e.png")
+	e2eKPYMin := minSeriesLeft(NamedProbabilitySeries{}, observedKPE2E)
+	if e2eKPYMin < 0 {
+		e2eKPYMin = 0
+	}
+	if err := saveKPPlot(kpE2EPlot, ks, NamedProbabilitySeries{}, observedKPE2E, e2eKPYMin, probabilityYMax, PBSThreshold99_9); err != nil {
+		return PlotOutput{}, err
+	}
+
+	deltaPE2ECSV := filepath.Join(outputDir, "delta_p_e2e.csv")
+	if err := saveDeltaObservedCSV(deltaPE2ECSV, deltas, observedDeltaPE2E); err != nil {
+		return PlotOutput{}, err
+	}
+	kpE2ECSV := filepath.Join(outputDir, "k_p_e2e.csv")
+	if err := saveKPObservedCSV(kpE2ECSV, ks, observedKPE2E); err != nil {
+		return PlotOutput{}, err
+	}
+
+	configCSV := filepath.Join(outputDir, "pbs_series_config.csv")
+	if err := saveSeriesConfigCSV(configCSV, configRows); err != nil {
+		return PlotOutput{}, err
+	}
+
+	out := PlotOutput{
+		DeltaPPath:          deltaPlot,
+		KPPath:              kpPlot,
+		DeltaPE2EPath:       deltaPE2EPlot,
+		KPE2EPath:           kpE2EPlot,
+		DeltaPE2ECSVPath:    deltaPE2ECSV,
+		KPE2ECSVPath:        kpE2ECSV,
+		DeltaCSVPath:        deltaCSV,
+		KPCSVPath:           kpCSV,
+		SeriesConfigCSVPath: configCSV,
+	}
+
+	if config.EmitZoomPlot {
+		zoomDeltaYMin := minObservedYMin(observedDeltaPs)
+		zoomKPYMin := minObservedYMin(observedKPs)
+		if zoomDeltaYMin < 0 {
+			zoomDeltaYMin = 0
+		}
+		if zoomKPYMin < 0 {
+			zoomKPYMin = 0
+		}
+		deltaZoom := filepath.Join(outputDir, "delta_p_zoom.png")
+		if err := saveDeltaPlot(deltaZoom, deltas, NamedProbabilitySeries{}, observedDeltaPs, zoomDeltaYMin, probabilityYMax, PBSThreshold99_9); err != nil {
+			return PlotOutput{}, err
+		}
+		kpZoom := filepath.Join(outputDir, "k_p_zoom.png")
+		if err := saveKPPlot(kpZoom, ks, NamedProbabilitySeries{}, observedKPs, zoomKPYMin, probabilityYMax, PBSThreshold99_9); err != nil {
+			return PlotOutput{}, err
+		}
+		out.DeltaPZoomPath = deltaZoom
+		out.KPZoomPath = kpZoom
+	}
+
+	return out, nil
 }

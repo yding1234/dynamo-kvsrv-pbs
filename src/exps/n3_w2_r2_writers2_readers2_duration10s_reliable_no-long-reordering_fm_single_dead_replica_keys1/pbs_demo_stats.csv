@@ -1,5 +1,0 @@
-scenario,write_ok,write_err_version,write_quorum_retry,write_no_key_retry,write_other_err,read_ok,read_no_key,read_quorum_retry,read_err,read_attempt_total,refresh_ok,refresh_err
-observe_baseline,2677,0,0,0,0,4040,0,1,0,4041,0,0
-observe_read_repair,2681,1,1,0,0,4011,0,2,0,4015,2,0
-observe_anti_entropy,2616,0,1,0,0,3853,0,1,0,3855,1,0
-observe_hinted_handoff,2217,0,40,0,0,3275,0,208,0,3523,31,0

@@ -9,9 +9,9 @@ import (
 
 	"github.com/anishathalye/porcupine"
 
-	"6.5840/kvsrv1/rpc"
-	"6.5840/models1"
-	"6.5840/tester1"
+	"dynamo-kvsrv/kvsrv1/rpc"
+	"dynamo-kvsrv/models1"
+	"dynamo-kvsrv/tester1"
 )
 
 const linearizabilityCheckTimeout = 1 * time.Second

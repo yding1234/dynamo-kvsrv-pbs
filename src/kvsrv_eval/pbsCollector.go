@@ -8,7 +8,7 @@ import (
 	"slices"
 	"sort"
 
-	"6.5840/kvsrv1/rpc"
+	"dynamo-kvsrv/kvsrv1/rpc"
 )
 
 // MessageTrace records one coordinator<->replica exchange
@@ -240,7 +240,6 @@ func (c *PBSCollector) ObserveCompletedWrite(w CompletedWrite) {
 	defer c.mu.Unlock()
 
 	// insert the write into the writes list by committed time
-	// TODO: use a binary search to find the insert index
 	// insertIndex := len(c.writes)
 	// for i := range c.writes {
 	// 	if c.writes[i].CommittedAt.After(w.CommittedAt) {
